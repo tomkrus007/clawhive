@@ -146,19 +146,8 @@ async fn create_agent(
     );
     std::fs::write(&path, yaml).map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Create default system prompt if it doesn't exist
-    let prompts_dir = state.root.join(format!("prompts/{}", body.agent_id));
-    std::fs::create_dir_all(&prompts_dir)
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let system_md = prompts_dir.join("system.md");
-    if !system_md.exists() {
-        let prompt = format!(
-            "You are {}, a helpful AI assistant powered by clawhive.\n\nYou are knowledgeable, concise, and friendly. When you don't know something, you say so honestly.\n",
-            body.name
-        );
-        std::fs::write(&system_md, prompt)
-            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
+    // Workspace prompt templates (AGENTS.md, SOUL.md, etc.) are created
+    // automatically by workspace.init_with_defaults() during agent startup.
 
     // Update routing.yaml default_agent_id
     let routing_path = state.root.join("config/routing.yaml");

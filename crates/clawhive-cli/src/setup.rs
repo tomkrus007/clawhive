@@ -29,6 +29,7 @@ enum SetupAction {
 enum ProviderId {
     Anthropic,
     OpenAi,
+    OpenAiChatGpt,
     AzureOpenAi,
     Gemini,
     DeepSeek,
@@ -42,6 +43,7 @@ enum ProviderId {
 const ALL_PROVIDERS: &[ProviderId] = &[
     ProviderId::Anthropic,
     ProviderId::OpenAi,
+    ProviderId::OpenAiChatGpt,
     ProviderId::AzureOpenAi,
     ProviderId::Gemini,
     ProviderId::DeepSeek,
@@ -57,6 +59,7 @@ impl ProviderId {
         match self {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
+            Self::OpenAiChatGpt => "openai-chatgpt",
             Self::AzureOpenAi => "azure-openai",
             Self::Gemini => "gemini",
             Self::DeepSeek => "deepseek",
@@ -89,7 +92,7 @@ impl ProviderId {
     fn supports_oauth(self) -> bool {
         // Anthropic subscription (setup-token) is no longer supported in the wizard.
         // The code path still exists in run_oauth_auth() for future use.
-        matches!(self, Self::OpenAi)
+        matches!(self, Self::OpenAi | Self::OpenAiChatGpt)
     }
 
     fn needs_custom_base_url(self) -> bool {
@@ -235,17 +238,19 @@ async fn handle_add_provider(
     }
 
     let api_base_override = if provider.needs_custom_base_url() {
-        let base: String = Input::with_theme(theme)
-            .with_prompt(
-                "Azure OpenAI endpoint URL (e.g. https://myresource.openai.azure.com/openai/v1)",
-            )
-            .interact_text()?;
+        let base = match input_or_back(
+            theme,
+            "Azure OpenAI endpoint URL (e.g. https://myresource.openai.azure.com/openai/v1)",
+        )? {
+            Some(b) => b,
+            None => return Ok(()),
+        };
         Some(base)
     } else if provider == ProviderId::Ollama {
-        let base: String = Input::with_theme(theme)
-            .with_prompt("Ollama API URL")
-            .default(provider.api_base().to_string())
-            .interact_text()?;
+        let base = match input_or_back_with_default(theme, "Ollama API URL", provider.api_base())? {
+            Some(b) => b,
+            None => return Ok(()),
+        };
         if base == provider.api_base() {
             None
         } else {
@@ -272,6 +277,31 @@ async fn handle_add_provider(
             display_rel(config_root, &path)
         ),
     );
+
+    // After configuring OpenAI with API key, offer to also set up ChatGPT OAuth
+    if provider == ProviderId::OpenAi && matches!(&auth, AuthChoice::ApiKey { .. }) {
+        let also_oauth = Confirm::with_theme(theme)
+            .with_prompt("Also set up ChatGPT OAuth? (allows using ChatGPT subscription)")
+            .default(false)
+            .interact()?;
+        if also_oauth {
+            let chatgpt_auth = run_oauth_auth(ProviderId::OpenAiChatGpt).await?;
+            let chatgpt_path = write_provider_config_unchecked(
+                config_root,
+                ProviderId::OpenAiChatGpt,
+                &chatgpt_auth,
+                None,
+            )?;
+            print_done(
+                term,
+                &format!(
+                    "ChatGPT OAuth saved: {}",
+                    display_rel(config_root, &chatgpt_path)
+                ),
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -281,14 +311,11 @@ fn handle_add_agent(
     state: &ConfigState,
     force: bool,
 ) -> Result<()> {
-    let agent_id: String = Input::with_theme(theme)
-        .with_prompt("Agent ID")
-        .default("clawhive-main".to_string())
-        .interact_text()?;
-    let agent_id = agent_id.trim().to_string();
-    if agent_id.is_empty() {
-        anyhow::bail!("agent id cannot be empty");
-    }
+    let agent_id = match input_or_back_with_default(theme, "Agent ID", "clawhive-main")? {
+        Some(id) if !id.is_empty() => id,
+        Some(_) => anyhow::bail!("agent id cannot be empty"),
+        None => return Ok(()),
+    };
 
     let existing = state.agents.iter().any(|a| a.agent_id == agent_id);
     if existing && !force {
@@ -301,14 +328,14 @@ fn handle_add_agent(
         }
     }
 
-    let name: String = Input::with_theme(theme)
-        .with_prompt("Display name")
-        .default("Clawhive".to_string())
-        .interact_text()?;
-    let emoji: String = Input::with_theme(theme)
-        .with_prompt("Emoji")
-        .default("🦀".to_string())
-        .interact_text()?;
+    let name = match input_or_back_with_default(theme, "Display name", "Clawhive")? {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+    let emoji = match input_or_back_with_default(theme, "Emoji", "🦀")? {
+        Some(e) => e,
+        None => return Ok(()),
+    };
 
     let mut models = Vec::new();
     for p in &state.providers {
@@ -329,9 +356,10 @@ fn handle_add_agent(
         .interact()?;
 
     let primary_model = if models[selected] == "Custom…" {
-        Input::with_theme(theme)
-            .with_prompt("Model ID (provider/model)")
-            .interact_text()?
+        match input_or_back(theme, "Model ID (provider/model)")? {
+            Some(m) => m,
+            None => return Ok(()),
+        }
     } else {
         models[selected].clone()
     };
@@ -363,27 +391,32 @@ fn handle_add_channel(
         _ => "my_discord_bot",
     };
 
-    let connector_id: String = Input::with_theme(theme)
-        .with_prompt("Bot name (a unique name to identify this bot)")
-        .default(default_id.to_string())
-        .interact_text()?;
+    let connector_id = match input_or_back_with_default(
+        theme,
+        "Bot name (a unique name to identify this bot)",
+        default_id,
+    )? {
+        Some(id) => id,
+        None => return Ok(()),
+    };
 
-    let token: String = Input::with_theme(theme)
-        .with_prompt("Bot token")
-        .interact_text()?;
-    let token = token.trim().to_string();
-    if token.is_empty() {
-        anyhow::bail!("Bot token cannot be empty");
-    }
+    let token = match input_or_back(theme, "Bot token")? {
+        Some(t) if !t.is_empty() => t,
+        Some(_) => anyhow::bail!("Bot token cannot be empty"),
+        None => return Ok(()),
+    };
     let masked = mask_secret(&token);
     println!("  {ARROW} Token saved: {masked}");
 
     let (groups, require_mention) = if channel_type == "discord" {
-        let groups_input: String = Input::with_theme(theme)
-            .with_prompt("Groups (comma-separated Discord channel IDs, leave empty for all)")
-            .default(String::new())
-            .allow_empty(true)
-            .interact_text()?;
+        let groups_input = match input_or_back_with_default(
+            theme,
+            "Groups (comma-separated Discord channel IDs, leave empty for all)",
+            "",
+        )? {
+            Some(g) => g,
+            None => return Ok(()),
+        };
         let groups: Vec<String> = groups_input
             .split(',')
             .map(|s| s.trim().to_string())
@@ -438,13 +471,19 @@ fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) -> Result<(
         .interact()?;
 
     let (provider, api_key) = if enable_ws {
-        let provider: String = Input::with_theme(theme)
-            .with_prompt("Web search provider (e.g. tavily, serper, brave)")
-            .default("tavily".into())
-            .interact_text()?;
-        let key: String = Input::with_theme(theme)
-            .with_prompt("API key for web search")
-            .interact_text()?;
+        let provider = match input_or_back_with_default(
+            theme,
+            "Web search provider (e.g. tavily, serper, brave)",
+            "tavily",
+        )? {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let key = match input_or_back(theme, "API key for web search")? {
+            Some(k) if !k.is_empty() => k,
+            Some(_) => anyhow::bail!("API key cannot be empty"),
+            None => return Ok(()),
+        };
         (Some(provider), Some(key))
     } else {
         (None, None)
@@ -858,7 +897,20 @@ async fn prompt_auth_choice(
     theme: &ColorfulTheme,
     provider: ProviderId,
 ) -> Result<Option<AuthChoice>> {
-    if provider.supports_oauth() {
+    if provider == ProviderId::OpenAiChatGpt {
+        // ChatGPT OAuth-only provider — no API key option
+        let methods = vec!["OAuth Login (use your ChatGPT subscription)", "← Back"];
+        let method = Select::with_theme(theme)
+            .with_prompt("Authentication method")
+            .items(&methods)
+            .default(0)
+            .interact()?;
+
+        match method {
+            0 => run_oauth_auth(provider).await.map(Some),
+            _ => Ok(None),
+        }
+    } else if provider.supports_oauth() {
         let methods: Vec<&str> = match provider {
             ProviderId::Anthropic => vec![
                 "Setup Token (run `claude setup-token` in terminal)",
@@ -880,7 +932,7 @@ async fn prompt_auth_choice(
 
         match method {
             0 => run_oauth_auth(provider).await.map(Some),
-            1 => prompt_api_key(theme, provider).map(Some),
+            1 => prompt_api_key(theme, provider),
             _ => Ok(None),
         }
     } else if provider == ProviderId::Ollama {
@@ -889,21 +941,50 @@ async fn prompt_auth_choice(
             api_key: String::new(),
         }))
     } else {
-        prompt_api_key(theme, provider).map(Some)
+        prompt_api_key(theme, provider)
     }
 }
 
-fn prompt_api_key(theme: &ColorfulTheme, provider: ProviderId) -> Result<AuthChoice> {
-    let api_key: String = Input::with_theme(theme)
-        .with_prompt(format!("Paste {} API key", provider.display_name()))
-        .interact_text()?;
-    let api_key = api_key.trim().to_string();
-    if api_key.is_empty() {
-        anyhow::bail!("API key cannot be empty");
-    }
+fn prompt_api_key(theme: &ColorfulTheme, provider: ProviderId) -> Result<Option<AuthChoice>> {
+    let api_key = match input_or_back(theme, &format!("Paste {} API key", provider.display_name()))?
+    {
+        Some(k) if !k.is_empty() => k,
+        Some(_) => anyhow::bail!("API key cannot be empty"),
+        None => return Ok(None),
+    };
     let masked = mask_secret(&api_key);
     println!("  {ARROW} Key saved: {masked}");
-    Ok(AuthChoice::ApiKey { api_key })
+    Ok(Some(AuthChoice::ApiKey { api_key }))
+}
+
+const BACK_SENTINEL: &str = "<";
+
+fn input_or_back(theme: &ColorfulTheme, prompt: &str) -> Result<Option<String>> {
+    let raw: String = Input::with_theme(theme)
+        .with_prompt(format!("{prompt} (< to go back)"))
+        .allow_empty(true)
+        .interact_text()?;
+    let trimmed = raw.trim();
+    if trimmed == BACK_SENTINEL || trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn input_or_back_with_default(
+    theme: &ColorfulTheme,
+    prompt: &str,
+    default: &str,
+) -> Result<Option<String>> {
+    let raw: String = Input::with_theme(theme)
+        .with_prompt(format!("{prompt} (< to go back)"))
+        .default(default.to_string())
+        .interact_text()?;
+    let trimmed = raw.trim();
+    if trimmed == BACK_SENTINEL {
+        return Ok(None);
+    }
+    Ok(Some(trimmed.to_string()))
 }
 
 /// Show first 8 and last 4 characters, mask the middle with asterisks.
@@ -919,7 +1000,7 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
     let profile_name = format!("{}-{}", provider.as_str(), unix_timestamp()?);
 
     match provider {
-        ProviderId::OpenAi => {
+        ProviderId::OpenAi | ProviderId::OpenAiChatGpt => {
             let term = Term::stdout();
             let _ = term.write_line("");
             let _ = term.write_line("  Opening browser for OpenAI OAuth login...");
@@ -1006,12 +1087,8 @@ fn write_agent_files_unchecked(
     let yaml = generate_agent_yaml(agent_id, name, emoji, primary_model);
     fs::write(agents_dir.join(format!("{agent_id}.yaml")), yaml)?;
 
-    let prompt_dir = config_root.join("prompts").join(agent_id);
-    fs::create_dir_all(&prompt_dir)?;
-    let prompt_path = prompt_dir.join("system.md");
-    if !prompt_path.exists() {
-        fs::write(&prompt_path, default_system_prompt(name))?;
-    }
+    // Workspace prompt templates (AGENTS.md, SOUL.md, etc.) are created
+    // automatically by workspace.init_with_defaults() during agent startup.
     Ok(())
 }
 
@@ -1024,7 +1101,9 @@ fn generate_provider_yaml(
     match auth {
         AuthChoice::OAuth { profile_name } => {
             let base = match provider {
-                ProviderId::OpenAi => "https://chatgpt.com/backend-api/codex",
+                ProviderId::OpenAi | ProviderId::OpenAiChatGpt => {
+                    "https://chatgpt.com/backend-api/codex"
+                }
                 _ => base_url,
             };
             format!(
@@ -1060,12 +1139,6 @@ fn generate_provider_yaml(
 fn generate_agent_yaml(agent_id: &str, name: &str, emoji: &str, primary_model: &str) -> String {
     format!(
         "agent_id: {agent_id}\nenabled: true\nidentity:\n  name: \"{name}\"\n  emoji: \"{emoji}\"\nmodel_policy:\n  primary: \"{primary_model}\"\n  fallbacks: []\nmemory_policy:\n  mode: \"standard\"\n  write_scope: \"all\"\n"
-    )
-}
-
-fn default_system_prompt(agent_name: &str) -> String {
-    format!(
-        "You are {agent_name}, a helpful AI assistant powered by clawhive.\n\nYou are knowledgeable, concise, and friendly. When you don't know something, you say so honestly.\n"
     )
 }
 
@@ -1115,7 +1188,7 @@ fn generate_main_yaml(
     }
 
     out.push_str(
-        "\nembedding:\n  enabled: true\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
+        "\nembedding:\n  enabled: true\n  provider: auto\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
     );
 
     out
@@ -1158,11 +1231,11 @@ fn unix_timestamp() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_channel_to_config, build_action_labels, default_system_prompt, ensure_required_dirs,
-        generate_agent_yaml, generate_main_yaml, generate_provider_yaml, generate_routing_yaml,
-        provider_models_for_id, remove_channel_from_config, remove_routing_binding,
-        validate_generated_config, write_agent_files_unchecked, write_provider_config_unchecked,
-        AuthChoice, ChannelConfig, ProviderId, SetupAction, ALL_PROVIDERS,
+        add_channel_to_config, build_action_labels, ensure_required_dirs, generate_agent_yaml,
+        generate_main_yaml, generate_provider_yaml, generate_routing_yaml, provider_models_for_id,
+        remove_channel_from_config, remove_routing_binding, validate_generated_config,
+        write_agent_files_unchecked, write_provider_config_unchecked, AuthChoice, ChannelConfig,
+        ProviderId, SetupAction, ALL_PROVIDERS,
     };
     use crate::setup_scan::ConfigState;
 
@@ -1198,6 +1271,22 @@ mod tests {
     }
 
     #[test]
+    fn provider_yaml_openai_chatgpt_uses_oauth_and_codex_base() {
+        let yaml = generate_provider_yaml(
+            ProviderId::OpenAiChatGpt,
+            &AuthChoice::OAuth {
+                profile_name: "openai-chatgpt-123".to_string(),
+            },
+            None,
+        );
+
+        assert!(yaml.contains("provider_id: openai-chatgpt"));
+        assert!(yaml.contains("auth_profile: \"openai-chatgpt-123\""));
+        assert!(yaml.contains("api_base: https://chatgpt.com/backend-api/codex"));
+        assert!(!yaml.contains("api_key:"));
+    }
+
+    #[test]
     fn agent_yaml_contains_identity_and_model_policy() {
         let yaml = generate_agent_yaml("clawhive-main", "Clawhive", "🦀", "openai/gpt-4o-mini");
 
@@ -1205,13 +1294,6 @@ mod tests {
         assert!(yaml.contains("name: \"Clawhive\""));
         assert!(yaml.contains("emoji: \"🦀\""));
         assert!(yaml.contains("primary: \"openai/gpt-4o-mini\""));
-    }
-
-    #[test]
-    fn default_system_prompt_contains_agent_name() {
-        let prompt = default_system_prompt("Clawhive");
-        assert!(prompt.contains("You are Clawhive"));
-        assert!(prompt.contains("helpful AI assistant"));
     }
 
     #[test]
@@ -1468,17 +1550,12 @@ mod tests {
     }
 
     #[test]
-    fn write_agent_files_unchecked_overwrites_yaml_and_keeps_existing_prompt() {
+    fn write_agent_files_unchecked_overwrites_yaml() {
         let temp = tempfile::tempdir().expect("create tempdir");
         ensure_required_dirs(temp.path()).expect("create required directories");
 
         let yaml_path = temp.path().join("config/agents.d/clawhive-main.yaml");
         std::fs::write(&yaml_path, "old: value\n").expect("write old agent yaml");
-
-        let prompt_dir = temp.path().join("prompts/clawhive-main");
-        std::fs::create_dir_all(&prompt_dir).expect("create prompt dir");
-        let prompt_path = prompt_dir.join("system.md");
-        std::fs::write(&prompt_path, "keep this prompt").expect("write existing prompt");
 
         write_agent_files_unchecked(
             temp.path(),
@@ -1490,10 +1567,7 @@ mod tests {
         .expect("write agent files");
 
         let yaml = std::fs::read_to_string(&yaml_path).expect("read yaml");
-        let prompt = std::fs::read_to_string(&prompt_path).expect("read prompt");
-
         assert!(yaml.contains("agent_id: clawhive-main"));
         assert!(!yaml.contains("old: value"));
-        assert_eq!(prompt, "keep this prompt");
     }
 }

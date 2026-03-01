@@ -81,6 +81,11 @@ impl TokenManager {
         Ok(active)
     }
 
+    pub fn get_profile(&self, name: &str) -> Result<Option<AuthProfile>> {
+        let store = self.load_store()?;
+        Ok(store.profiles.get(name).cloned())
+    }
+
     pub fn save_profile(
         &self,
         profile_name: impl Into<String>,

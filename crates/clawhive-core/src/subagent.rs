@@ -82,7 +82,7 @@ impl SubAgentRunner {
         let system = self
             .personas
             .get(&req.target_agent_id)
-            .map(|p| p.assembled_system_prompt())
+            .map(|p| p.assembled_system_prompt_minimal())
             .unwrap_or_default();
 
         let run_id = Uuid::new_v4();

@@ -205,7 +205,7 @@ mod tests {
 
     fn base_main_yaml(channels_yaml: &str) -> String {
         format!(
-            "app:\n  name: clawhive\nruntime:\n  max_concurrent: 4\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\nchannels:\n{channels_yaml}\nembedding:\n  enabled: true\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\ntools: {{}}\n"
+            "app:\n  name: clawhive\nruntime:\n  max_concurrent: 4\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\nchannels:\n{channels_yaml}\nembedding:\n  enabled: true\n  provider: auto\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\ntools: {{}}\n"
         )
     }
 

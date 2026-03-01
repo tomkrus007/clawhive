@@ -799,12 +799,18 @@ async fn bootstrap(
             .unwrap_or(&agent_config.agent_id);
         let emoji = identity.and_then(|i| i.emoji.as_deref());
 
-        // Resolve workspace path
+        // Resolve workspace path and ensure prompt templates exist
         let workspace = Workspace::resolve(
             root,
             &agent_config.agent_id,
             agent_config.workspace.as_deref(),
         );
+        if let Err(e) = workspace.init_with_defaults().await {
+            tracing::warn!(
+                "Failed to init workspace for {}: {e}",
+                agent_config.agent_id
+            );
+        }
 
         match load_persona_from_workspace(workspace.root(), &agent_config.agent_id, name, emoji) {
             Ok(mut persona) => {
@@ -902,15 +908,11 @@ async fn bootstrap(
 }
 
 fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
-    let active_profile = TokenManager::new()
-        .ok()
+    let token_manager = TokenManager::new().ok();
+    let active_profile = token_manager
+        .as_ref()
         .and_then(|m| m.get_active_profile().ok().flatten());
 
-    let openai_profile = active_profile.as_ref().and_then(|p| match p {
-        AuthProfile::OpenAiOAuth { .. } => Some(p.clone()),
-        AuthProfile::ApiKey { provider_id, .. } if provider_id == "openai" => Some(p.clone()),
-        _ => None,
-    });
     let anthropic_profile = active_profile.as_ref().and_then(|p| match p {
         AuthProfile::AnthropicSession { .. } => Some(p.clone()),
         AuthProfile::ApiKey { provider_id, .. } if provider_id == "anthropic" => Some(p.clone()),
@@ -922,6 +924,14 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
         if !provider_config.enabled {
             continue;
         }
+
+        // Resolve OAuth profile: named auth_profile takes priority, then fallback to active_profile
+        let named_profile = provider_config.auth_profile.as_ref().and_then(|name| {
+            token_manager
+                .as_ref()
+                .and_then(|m| m.get_profile(name).ok().flatten())
+        });
+
         match provider_config.provider_id.as_str() {
             "anthropic" => {
                 let api_key = provider_config
@@ -947,21 +957,30 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
                     .clone()
                     .filter(|k| !k.is_empty())
                     .unwrap_or_default();
+
+                // Resolve the effective OAuth profile for this provider
+                let oauth_profile = named_profile.clone().or_else(|| {
+                    active_profile.as_ref().and_then(|p| match p {
+                        AuthProfile::OpenAiOAuth { .. } => Some(p.clone()),
+                        _ => None,
+                    })
+                });
+
                 if !api_key.is_empty() {
                     // Standard API key path — use chat/completions
                     let provider = Arc::new(OpenAiProvider::new_with_auth(
                         api_key,
                         provider_config.api_base.clone(),
-                        openai_profile.clone(),
+                        oauth_profile,
                     ));
                     registry.register("openai", provider);
                 } else if let Some(AuthProfile::OpenAiOAuth {
                     access_token,
                     chatgpt_account_id,
                     ..
-                }) = &openai_profile
+                }) = &oauth_profile
                 {
-                    // OAuth path — use ChatGPT Responses API
+                    // Backward compat: openai config with no api_key but has OAuth → ChatGPT provider
                     let provider = Arc::new(OpenAiChatGptProvider::new(
                         access_token.clone(),
                         chatgpt_account_id.clone(),
@@ -974,6 +993,35 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
                     );
                 } else {
                     tracing::warn!("OpenAI: no API key and no OAuth profile, skipping");
+                }
+            }
+            "openai-chatgpt" => {
+                // Dedicated ChatGPT OAuth provider
+                let oauth_profile = named_profile.clone().or_else(|| {
+                    active_profile.as_ref().and_then(|p| match p {
+                        AuthProfile::OpenAiOAuth { .. } => Some(p.clone()),
+                        _ => None,
+                    })
+                });
+
+                if let Some(AuthProfile::OpenAiOAuth {
+                    access_token,
+                    chatgpt_account_id,
+                    ..
+                }) = &oauth_profile
+                {
+                    let provider = Arc::new(OpenAiChatGptProvider::new(
+                        access_token.clone(),
+                        chatgpt_account_id.clone(),
+                        provider_config.api_base.clone(),
+                    ));
+                    registry.register("openai-chatgpt", provider);
+                    tracing::info!(
+                        "openai-chatgpt registered via OAuth (account: {:?})",
+                        chatgpt_account_id
+                    );
+                } else {
+                    tracing::warn!("openai-chatgpt: no OAuth profile found, skipping");
                 }
             }
             "azure-openai" => {
@@ -1048,10 +1096,16 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
     aliases
         .entry("gpt".to_string())
         .or_insert_with(|| "openai/gpt-5.3-codex".to_string());
+    aliases
+        .entry("chatgpt".to_string())
+        .or_insert_with(|| "openai-chatgpt/gpt-5.3-codex".to_string());
 
     let mut global_fallbacks = Vec::new();
     if registry.get("openai").is_ok() {
         global_fallbacks.push("gpt".to_string());
+    }
+    if registry.get("openai-chatgpt").is_ok() {
+        global_fallbacks.push("chatgpt".to_string());
     }
 
     LlmRouter::new(registry, aliases, global_fallbacks)
@@ -1215,13 +1269,11 @@ fn ensure_skeleton_config(root: &Path, port: u16) -> Result<()> {
     std::fs::create_dir_all(config_dir.join("agents.d"))?;
     std::fs::create_dir_all(config_dir.join("providers.d"))?;
     std::fs::create_dir_all(config_dir.join("schedules.d"))?;
-    let prompts_dir = root.join("prompts/clawhive-main");
-    std::fs::create_dir_all(&prompts_dir)?;
 
     // config/main.yaml — channels disabled
     std::fs::write(
         &main_yaml,
-        "app:\n  name: clawhive\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n  telegram:\n    enabled: false\n    connectors: []\n  discord:\n    enabled: false\n    connectors: []\n\nembedding:\n  enabled: true\n  provider: stub\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
+        "app:\n  name: clawhive\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n  telegram:\n    enabled: false\n    connectors: []\n  discord:\n    enabled: false\n    connectors: []\n\nembedding:\n  enabled: true\n  provider: auto\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
     )?;
 
     // config/routing.yaml
@@ -1236,11 +1288,8 @@ fn ensure_skeleton_config(root: &Path, port: u16) -> Result<()> {
         "agent_id: clawhive-main\nenabled: false\nidentity:\n  name: \"Clawhive\"\n  emoji: \"\\U0001F41D\"\nmodel_policy:\n  primary: \"\"\n  fallbacks: []\nmemory_policy:\n  mode: \"standard\"\n  write_scope: \"all\"\n",
     )?;
 
-    // prompts/clawhive-main/system.md
-    std::fs::write(
-        prompts_dir.join("system.md"),
-        "You are Clawhive, a helpful AI assistant powered by clawhive.\n\nYou are knowledgeable, concise, and friendly. When you don't know something, you say so honestly.\n",
-    )?;
+    // Workspace prompt templates (AGENTS.md, SOUL.md, etc.) are created
+    // automatically by workspace.init_with_defaults() during agent startup.
 
     eprintln!();
     eprintln!("  \u{1F41D} First run detected — setup required.");

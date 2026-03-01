@@ -41,6 +41,19 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         ],
     },
     ProviderPreset {
+        id: "openai-chatgpt",
+        name: "OpenAI ChatGPT (OAuth)",
+        api_base: "https://chatgpt.com/backend-api/codex",
+        needs_key: false,
+        default_model: "gpt-5.3-codex",
+        models: &[
+            "gpt-5.3-codex",
+            "gpt-5.2-codex",
+            "gpt-5.1-codex-max",
+            "o3-pro",
+        ],
+    },
+    ProviderPreset {
         id: "azure-openai",
         name: "Azure OpenAI",
         api_base: "https://<your-resource>.openai.azure.com/openai/v1",

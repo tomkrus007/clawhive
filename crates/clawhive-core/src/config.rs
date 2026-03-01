@@ -160,6 +160,8 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
+    pub auth_profile: Option<String>,
+    #[serde(default)]
     pub models: Vec<String>,
 }
 
@@ -511,6 +513,9 @@ fn resolve_providers_env(providers: &mut [ProviderConfig]) {
     for provider in providers {
         provider.provider_id = resolve_env_var(&provider.provider_id);
         provider.api_base = resolve_env_var(&provider.api_base);
+        if let Some(profile) = &mut provider.auth_profile {
+            *profile = resolve_env_var(profile);
+        }
         for model in &mut provider.models {
             *model = resolve_env_var(model);
         }
