@@ -258,7 +258,7 @@ impl EventHandler for DiscordHandler {
 
             match result {
                 Ok(outbound) => {
-                    if let Err(err) = channel_id.say(&http, outbound.text).await {
+                    if let Err(err) = send_chunked(channel_id, &http, &outbound.text).await {
                         tracing::error!("failed to send discord reply: {err}");
                     }
                 }
@@ -274,6 +274,45 @@ impl EventHandler for DiscordHandler {
             }
         });
     }
+}
+
+const DISCORD_MAX_LEN: usize = 2000;
+
+/// Split a message into chunks that fit within Discord's 2000-char limit.
+/// Tries to break at newlines, then spaces, to keep messages readable.
+fn split_message(text: &str) -> Vec<&str> {
+    if text.len() <= DISCORD_MAX_LEN {
+        return vec![text];
+    }
+    let mut chunks = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.len() <= DISCORD_MAX_LEN {
+            chunks.push(rest);
+            break;
+        }
+        let boundary = &rest[..DISCORD_MAX_LEN];
+        let split_at = boundary
+            .rfind('\n')
+            .or_else(|| boundary.rfind(' '))
+            .map(|i| i + 1)
+            .unwrap_or(DISCORD_MAX_LEN);
+        chunks.push(&rest[..split_at]);
+        rest = &rest[split_at..];
+    }
+    chunks
+}
+
+/// Send a potentially long message as multiple chunks.
+async fn send_chunked(
+    channel_id: ChannelId,
+    http: &Http,
+    text: &str,
+) -> Result<(), serenity::Error> {
+    for chunk in split_message(text) {
+        channel_id.say(http, chunk).await?;
+    }
+    Ok(())
 }
 
 /// Parse conversation_scope to extract channel ID
@@ -335,7 +374,7 @@ async fn spawn_delivery_listener(
         };
 
         let channel = ChannelId::new(channel_id);
-        if let Err(e) = channel.say(&http, &text).await {
+        if let Err(e) = send_chunked(channel, &http, &text).await {
             tracing::error!("Failed to deliver announce message: {e}");
         } else {
             tracing::info!("Delivered scheduled task result to channel {}", channel_id);
@@ -429,5 +468,50 @@ mod tests {
         let adapter = DiscordAdapter::new("dc-prod-1");
         let msg = adapter.to_inbound(None, 123, 456, "test");
         assert_eq!(msg.connector_id, "dc-prod-1");
+    }
+
+    #[test]
+    fn split_message_short_text_single_chunk() {
+        let chunks = split_message("hello");
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn split_message_exact_limit_single_chunk() {
+        let text = "a".repeat(DISCORD_MAX_LEN);
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), DISCORD_MAX_LEN);
+    }
+
+    #[test]
+    fn split_message_long_text_splits_at_newline() {
+        let mut text = "a".repeat(1900);
+        text.push('\n');
+        text.push_str(&"b".repeat(500));
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].len() <= DISCORD_MAX_LEN);
+        assert!(chunks[1].len() <= DISCORD_MAX_LEN);
+    }
+
+    #[test]
+    fn split_message_long_text_splits_at_space() {
+        let mut text = "a".repeat(1900);
+        text.push(' ');
+        text.push_str(&"b".repeat(500));
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].len() <= DISCORD_MAX_LEN);
+    }
+
+    #[test]
+    fn split_message_no_break_point_hard_splits() {
+        let text = "a".repeat(4500);
+        let chunks = split_message(&text);
+        assert!(chunks.len() >= 3);
+        for chunk in &chunks {
+            assert!(chunk.len() <= DISCORD_MAX_LEN);
+        }
     }
 }
