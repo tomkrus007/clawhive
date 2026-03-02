@@ -281,7 +281,12 @@ impl EventHandler for DiscordHandler {
 
             match result {
                 Ok(outbound) => {
-                    if let Err(err) = send_chunked(channel_id, &http, &outbound.text).await {
+                    let reply = if outbound.text.trim().is_empty() {
+                        "Sorry, I got an empty response. Please try again."
+                    } else {
+                        outbound.text.as_str()
+                    };
+                    if let Err(err) = send_chunked(channel_id, &http, reply).await {
                         tracing::error!("failed to send discord reply: {err}");
                     }
                 }
@@ -335,7 +340,14 @@ impl EventHandler for DiscordHandler {
         let inbound = adapter.to_inbound(guild_id, channel_id.get(), user_id, &text);
 
         match self.gateway.handle_inbound(inbound).await {
-            Ok(outbound) => edit_deferred_response(&ctx, &cmd, &outbound.text).await,
+            Ok(outbound) => {
+                let reply = if outbound.text.trim().is_empty() {
+                    "Sorry, I got an empty response. Please try again."
+                } else {
+                    outbound.text.as_str()
+                };
+                edit_deferred_response(&ctx, &cmd, reply).await;
+            }
             Err(err) => {
                 tracing::error!("discord slash command gateway error: {err}");
                 edit_deferred_response(&ctx, &cmd, "Internal error, please try again later.").await;
