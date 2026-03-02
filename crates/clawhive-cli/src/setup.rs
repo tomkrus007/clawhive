@@ -162,6 +162,12 @@ pub async fn run_setup(config_root: &Path, force: bool) -> Result<()> {
                     CRAB,
                     style("Setup finished.").green().bold()
                 ))?;
+                term.write_line("")?;
+                term.write_line(&format!(
+                    "  {} Run {} to apply changes.",
+                    ARROW,
+                    style("clawhive restart").cyan().bold()
+                ))?;
                 break;
             }
         }
