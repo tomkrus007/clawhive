@@ -29,7 +29,6 @@ enum SetupAction {
 enum ProviderId {
     Anthropic,
     OpenAi,
-    OpenAiChatGpt,
     AzureOpenAi,
     Gemini,
     DeepSeek,
@@ -43,7 +42,6 @@ enum ProviderId {
 const ALL_PROVIDERS: &[ProviderId] = &[
     ProviderId::Anthropic,
     ProviderId::OpenAi,
-    ProviderId::OpenAiChatGpt,
     ProviderId::AzureOpenAi,
     ProviderId::Gemini,
     ProviderId::DeepSeek,
@@ -59,7 +57,6 @@ impl ProviderId {
         match self {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
-            Self::OpenAiChatGpt => "openai-chatgpt",
             Self::AzureOpenAi => "azure-openai",
             Self::Gemini => "gemini",
             Self::DeepSeek => "deepseek",
@@ -92,7 +89,7 @@ impl ProviderId {
     fn supports_oauth(self) -> bool {
         // Anthropic subscription (setup-token) is no longer supported in the wizard.
         // The code path still exists in run_oauth_auth() for future use.
-        matches!(self, Self::OpenAi | Self::OpenAiChatGpt)
+        matches!(self, Self::OpenAi)
     }
 
     fn needs_custom_base_url(self) -> bool {
@@ -277,30 +274,6 @@ async fn handle_add_provider(
             display_rel(config_root, &path)
         ),
     );
-
-    // After configuring OpenAI with API key, offer to also set up ChatGPT OAuth
-    if provider == ProviderId::OpenAi && matches!(&auth, AuthChoice::ApiKey { .. }) {
-        let also_oauth = Confirm::with_theme(theme)
-            .with_prompt("Also set up ChatGPT OAuth? (allows using ChatGPT subscription)")
-            .default(false)
-            .interact()?;
-        if also_oauth {
-            let chatgpt_auth = run_oauth_auth(ProviderId::OpenAiChatGpt).await?;
-            let chatgpt_path = write_provider_config_unchecked(
-                config_root,
-                ProviderId::OpenAiChatGpt,
-                &chatgpt_auth,
-                None,
-            )?;
-            print_done(
-                term,
-                &format!(
-                    "ChatGPT OAuth saved: {}",
-                    display_rel(config_root, &chatgpt_path)
-                ),
-            );
-        }
-    }
 
     Ok(())
 }
@@ -915,20 +888,7 @@ async fn prompt_auth_choice(
     theme: &ColorfulTheme,
     provider: ProviderId,
 ) -> Result<Option<AuthChoice>> {
-    if provider == ProviderId::OpenAiChatGpt {
-        // ChatGPT OAuth-only provider — no API key option
-        let methods = vec!["OAuth Login (use your ChatGPT subscription)", "← Back"];
-        let method = Select::with_theme(theme)
-            .with_prompt("Authentication method")
-            .items(&methods)
-            .default(0)
-            .interact()?;
-
-        match method {
-            0 => run_oauth_auth(provider).await.map(Some),
-            _ => Ok(None),
-        }
-    } else if provider.supports_oauth() {
+    if provider.supports_oauth() {
         let methods: Vec<&str> = match provider {
             ProviderId::Anthropic => vec![
                 "Setup Token (run `claude setup-token` in terminal)",
@@ -1018,7 +978,7 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
     let profile_name = format!("{}-{}", provider.as_str(), unix_timestamp()?);
 
     match provider {
-        ProviderId::OpenAi | ProviderId::OpenAiChatGpt => {
+        ProviderId::OpenAi => {
             let term = Term::stdout();
             let _ = term.write_line("");
             let _ = term.write_line("  Opening browser for OpenAI OAuth login...");
@@ -1119,9 +1079,7 @@ fn generate_provider_yaml(
     match auth {
         AuthChoice::OAuth { profile_name } => {
             let base = match provider {
-                ProviderId::OpenAi | ProviderId::OpenAiChatGpt => {
-                    "https://chatgpt.com/backend-api/codex"
-                }
+                ProviderId::OpenAi => "https://chatgpt.com/backend-api/codex",
                 _ => base_url,
             };
             format!(
@@ -1286,17 +1244,17 @@ mod tests {
     }
 
     #[test]
-    fn provider_yaml_openai_chatgpt_uses_oauth_and_codex_base() {
+    fn provider_yaml_openai_oauth_uses_codex_base() {
         let yaml = generate_provider_yaml(
-            ProviderId::OpenAiChatGpt,
+            ProviderId::OpenAi,
             &AuthChoice::OAuth {
-                profile_name: "openai-chatgpt-123".to_string(),
+                profile_name: "openai-oauth-123".to_string(),
             },
             None,
         );
 
-        assert!(yaml.contains("provider_id: openai-chatgpt"));
-        assert!(yaml.contains("auth_profile: \"openai-chatgpt-123\""));
+        assert!(yaml.contains("provider_id: openai"));
+        assert!(yaml.contains("auth_profile: \"openai-oauth-123\""));
         assert!(yaml.contains("api_base: https://chatgpt.com/backend-api/codex"));
         assert!(!yaml.contains("api_key:"));
     }
