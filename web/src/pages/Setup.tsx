@@ -11,6 +11,8 @@ import {
   useRestart,
   useUpdateWebSearch,
   useProviderPresets,
+  useRouting,
+  useUpdateRouting,
 } from "@/hooks/use-api";
 import type { ProviderPreset } from "@/hooks/use-api";
 import { CheckCircle2, ChevronRight, ChevronLeft, Loader2, Zap, ExternalLink } from "lucide-react";
@@ -44,6 +46,7 @@ export default function SetupPage() {
   const [channelConnectorId, setChannelConnectorId] = useState("");
   const [channelGroups, setChannelGroups] = useState("");
   const [channelRequireMention, setChannelRequireMention] = useState(true);
+  const [channelRoutingKinds, setChannelRoutingKinds] = useState<("dm" | "group")[]>(["dm", "group"]);
   const [channelCreated, setChannelCreated] = useState(false);
 
   // Step 4: Web Search
@@ -61,6 +64,8 @@ export default function SetupPage() {
   const updateWebSearch = useUpdateWebSearch();
   const restart = useRestart();
   const { data: providerPresets } = useProviderPresets();
+  const { data: routingData } = useRouting();
+  const updateRouting = useUpdateRouting();
 
   // Mark wizard as active once we start interacting
   useEffect(() => {
@@ -133,14 +138,33 @@ export default function SetupPage() {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+    const hasGroup = channelRoutingKinds.includes("group");
     try {
       await addConnector.mutateAsync({
         kind: channelKind,
         connectorId: channelConnectorId,
         token: channelToken,
-        ...(channelKind === "discord" && groups.length > 0 ? { groups } : {}),
-        ...(channelKind === "discord" ? { requireMention: channelRequireMention } : {}),
+        ...(channelKind === "discord" && hasGroup && groups.length > 0 ? { groups } : {}),
+        ...(hasGroup ? { requireMention: channelRequireMention } : {}),
       });
+
+      // Auto-create routing bindings
+      const agentId = "clawhive-main";
+      const existing = (routingData as { default_agent_id?: string; bindings?: Array<Record<string, unknown>> }) ?? {};
+      const bindings = [...(existing.bindings ?? [])];
+      for (const kind of channelRoutingKinds) {
+        bindings.push({
+          channel_type: channelKind,
+          connector_id: channelConnectorId,
+          match: { kind },
+          agent_id: agentId,
+        });
+      }
+      await updateRouting.mutateAsync({
+        default_agent_id: existing.default_agent_id ?? agentId,
+        bindings,
+      });
+
       setChannelCreated(true);
     } catch {
       // error is handled by mutation state
@@ -288,10 +312,12 @@ export default function SetupPage() {
               onGroupsChange={setChannelGroups}
               requireMention={channelRequireMention}
               onRequireMentionChange={setChannelRequireMention}
+              routingKinds={channelRoutingKinds}
+              onRoutingKindsChange={setChannelRoutingKinds}
               onSubmit={handleAddChannel}
-              isCreating={addConnector.isPending}
+              isCreating={addConnector.isPending || updateRouting.isPending}
               isCreated={channelCreated}
-              error={addConnector.error?.message}
+              error={addConnector.error?.message ?? updateRouting.error?.message}
             />
           )}
           {step === 3 && (
@@ -604,6 +630,13 @@ function StepAgent({
 // ---------------------------------------------------------------------------
 // Step 3: Channel (optional)
 // ---------------------------------------------------------------------------
+type RoutingKind = "dm" | "group";
+const ROUTING_OPTIONS: { label: string; value: RoutingKind[] }[] = [
+  { label: "DM only", value: ["dm"] },
+  { label: "Group only", value: ["group"] },
+  { label: "DM + Group", value: ["dm", "group"] },
+];
+
 function StepChannel({
   kind,
   onKindChange,
@@ -615,6 +648,8 @@ function StepChannel({
   onGroupsChange,
   requireMention,
   onRequireMentionChange,
+  routingKinds,
+  onRoutingKindsChange,
   onSubmit,
   isCreating,
   isCreated,
@@ -630,11 +665,15 @@ function StepChannel({
   onGroupsChange: (v: string) => void;
   requireMention: boolean;
   onRequireMentionChange: (v: boolean) => void;
+  routingKinds: RoutingKind[];
+  onRoutingKindsChange: (v: RoutingKind[]) => void;
   onSubmit: () => void;
   isCreating: boolean;
   isCreated: boolean;
   error?: string;
 }) {
+  const hasGroup = routingKinds.includes("group");
+
   return (
     <div className="space-y-6">
       <div>
@@ -695,41 +734,70 @@ function StepChannel({
               />
             </div>
 
-            {kind === "discord" && (
-              <>
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                    Group IDs (optional)
-                  </label>
-                  <Input
-                    placeholder="Comma-separated Discord channel IDs, leave empty for all"
-                    value={groups}
-                    onChange={(e) => onGroupsChange(e.target.value)}
-                    disabled={isCreated}
-                    className="mt-1.5"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">Only respond in these channels. Empty = all channels.</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                    Require @mention
-                  </label>
-                  <button
-                    onClick={() => { if (!isCreated) onRequireMentionChange(!requireMention); }}
-                    disabled={isCreated}
-                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                      requireMention ? "bg-primary" : "bg-muted-foreground/30"
-                    } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
-                  >
-                    <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                      requireMention ? "translate-x-4.5" : "translate-x-0.5"
-                    }`} />
-                  </button>
-                  <span className="text-xs text-muted-foreground">
-                    {requireMention ? "Bot responds only when @mentioned" : "Bot responds to all messages"}
-                  </span>
-                </div>
-              </>
+            {/* Message routing kind selector */}
+            <div>
+              <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Message Routing
+              </label>
+              <div className="mt-1.5 flex gap-2">
+                {ROUTING_OPTIONS.map((opt) => {
+                  const selected = JSON.stringify(routingKinds) === JSON.stringify(opt.value);
+                  return (
+                    <button
+                      key={opt.label}
+                      onClick={() => { if (!isCreated) onRoutingKindsChange(opt.value); }}
+                      disabled={isCreated}
+                      className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-all ${
+                        selected
+                          ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/20"
+                          : "border-border hover:border-primary/40"
+                      } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Groups: Discord + group routing only */}
+            {kind === "discord" && hasGroup && (
+              <div>
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Group IDs (optional)
+                </label>
+                <Input
+                  placeholder="Comma-separated Discord channel IDs, leave empty for all"
+                  value={groups}
+                  onChange={(e) => onGroupsChange(e.target.value)}
+                  disabled={isCreated}
+                  className="mt-1.5"
+                />
+                <p className="text-xs text-muted-foreground mt-1">Only respond in these channels. Empty = all channels.</p>
+              </div>
+            )}
+
+            {/* Require @mention: any channel type with group routing */}
+            {hasGroup && (
+              <div className="flex items-center gap-3">
+                <label className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                  Require @mention
+                </label>
+                <button
+                  onClick={() => { if (!isCreated) onRequireMentionChange(!requireMention); }}
+                  disabled={isCreated}
+                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                    requireMention ? "bg-primary" : "bg-muted-foreground/30"
+                  } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
+                >
+                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                    requireMention ? "translate-x-4.5" : "translate-x-0.5"
+                  }`} />
+                </button>
+                <span className="text-xs text-muted-foreground">
+                  {requireMention ? "Bot responds only when @mentioned" : "Bot responds to all messages"}
+                </span>
+              </div>
             )}
 
             <div className="flex items-center justify-between">
