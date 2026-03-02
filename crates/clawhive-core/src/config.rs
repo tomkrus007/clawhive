@@ -66,6 +66,8 @@ impl Default for EmbeddingConfig {
 pub struct TelegramConnectorConfig {
     pub connector_id: String,
     pub token: String,
+    #[serde(default = "default_true")]
+    pub require_mention: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

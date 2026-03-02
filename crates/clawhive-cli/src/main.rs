@@ -1654,13 +1654,20 @@ async fn start_bot(root: &Path, with_tui: bool, port: u16) -> Result<()> {
                     );
                     continue;
                 }
-                tracing::info!("Registering Telegram bot: {}", connector.connector_id);
-                bots.push(Box::new(TelegramBot::new(
-                    token,
-                    connector.connector_id.clone(),
-                    gateway.clone(),
-                    bus.clone(),
-                )));
+                tracing::info!(
+                    "Registering Telegram bot: {} (require_mention: {})",
+                    connector.connector_id,
+                    connector.require_mention
+                );
+                bots.push(Box::new(
+                    TelegramBot::new(
+                        token,
+                        connector.connector_id.clone(),
+                        gateway.clone(),
+                        bus.clone(),
+                    )
+                    .with_require_mention(connector.require_mention),
+                ));
             }
         }
     }

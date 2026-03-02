@@ -61,6 +61,7 @@ pub struct TelegramBot {
     connector_id: String,
     gateway: Arc<Gateway>,
     bus: Arc<EventBus>,
+    require_mention: bool,
 }
 
 impl TelegramBot {
@@ -75,7 +76,13 @@ impl TelegramBot {
             connector_id,
             gateway,
             bus,
+            require_mention: true,
         }
+    }
+
+    pub fn with_require_mention(mut self, require: bool) -> Self {
+        self.require_mention = require;
+        self
     }
 
     pub async fn run_impl(self) -> anyhow::Result<()> {
@@ -96,6 +103,7 @@ impl TelegramBot {
         let gateway = self.gateway;
         let bus = self.bus;
         let connector_id = self.connector_id.clone();
+        let require_mention = self.require_mention;
 
         // Create a bot holder for the delivery listener
         let bot_holder: Arc<RwLock<Option<Bot>>> = Arc::new(RwLock::new(Some(bot.clone())));
@@ -136,6 +144,11 @@ impl TelegramBot {
                 let user_id = msg.from.as_ref().map(|user| user.id.0 as i64).unwrap_or(0);
                 let (is_mention, mention_target) = detect_mention(&msg);
                 let message_id = msg.id.0;
+
+                // Group chat filtering: skip non-mention messages when require_mention is true
+                if chat_id.0 < 0 && require_mention && !is_mention {
+                    return Ok::<(), teloxide::RequestError>(());
+                }
 
                 let mut inbound = adapter.to_inbound(chat_id.0, user_id, &text, Some(message_id));
                 inbound.is_mention = is_mention;

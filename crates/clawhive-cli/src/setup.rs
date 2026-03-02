@@ -408,20 +408,40 @@ fn handle_add_channel(
     let masked = mask_secret(&token);
     println!("  {ARROW} Token saved: {masked}");
 
-    let (groups, require_mention) = if channel_type == "discord" {
-        let groups_input = match input_or_back_with_default(
-            theme,
-            "Groups (comma-separated Discord channel IDs, leave empty for all)",
-            "",
-        )? {
-            Some(g) => g,
-            None => return Ok(()),
+    // Message routing kind selection
+    let kind_options = ["DM only", "Group only", "DM + Group", "← Back"];
+    let kind_idx = Select::with_theme(theme)
+        .with_prompt("Message routing")
+        .items(&kind_options)
+        .default(0)
+        .interact()?;
+    let kinds: Vec<&str> = match kind_idx {
+        0 => vec!["dm"],
+        1 => vec!["group"],
+        2 => vec!["dm", "group"],
+        _ => return Ok(()),
+    };
+    let has_group = kinds.contains(&"group");
+
+    // Groups + require_mention: only when group routing is selected
+    let (groups, require_mention) = if has_group {
+        let groups = if channel_type == "discord" {
+            let groups_input = match input_or_back_with_default(
+                theme,
+                "Groups (comma-separated Discord channel IDs, leave empty for all)",
+                "",
+            )? {
+                Some(g) => g,
+                None => return Ok(()),
+            };
+            groups_input
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else {
+            Vec::new()
         };
-        let groups: Vec<String> = groups_input
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
         let require_mention = Confirm::with_theme(theme)
             .with_prompt("Require @mention in groups?")
             .default(true)
@@ -443,6 +463,7 @@ fn handle_add_channel(
             channel_type,
             &connector_id,
             &state.agents[agent_idx].agent_id,
+            &kinds,
         )?;
     } else {
         println!("  No agents configured yet. Routing will need to be set up later.");
@@ -471,15 +492,17 @@ fn handle_configure_tools(config_root: &Path, theme: &ColorfulTheme) -> Result<(
         .interact()?;
 
     let (provider, api_key) = if enable_ws {
-        let provider = match input_or_back_with_default(
-            theme,
-            "Web search provider (e.g. tavily, serper, brave)",
-            "tavily",
-        )? {
-            Some(p) => p,
-            None => return Ok(()),
-        };
-        let key = match input_or_back(theme, "API key for web search")? {
+        let ws_providers = ["Brave", "Tavily", "Serper", "← Back"];
+        let selected = Select::with_theme(theme)
+            .with_prompt("Web search provider")
+            .items(&ws_providers)
+            .default(0)
+            .interact()?;
+        if selected == ws_providers.len() - 1 {
+            return Ok(());
+        }
+        let provider = ws_providers[selected].to_lowercase();
+        let key = match input_or_back(theme, &format!("{} API key", ws_providers[selected]))? {
             Some(k) if !k.is_empty() => k,
             Some(_) => anyhow::bail!("API key cannot be empty"),
             None => return Ok(()),
@@ -691,24 +714,22 @@ fn add_channel_to_config(
         serde_yaml::Value::String("token".into()),
         serde_yaml::Value::String(cfg.token.clone()),
     );
-    if channel_type == "discord" {
-        if !cfg.groups.is_empty() {
-            let groups_seq: Vec<serde_yaml::Value> = cfg
-                .groups
-                .iter()
-                .map(|g| serde_yaml::Value::String(g.clone()))
-                .collect();
-            connector_map.insert(
-                serde_yaml::Value::String("groups".into()),
-                serde_yaml::Value::Sequence(groups_seq),
-            );
-        }
-        if !cfg.require_mention {
-            connector_map.insert(
-                serde_yaml::Value::String("require_mention".into()),
-                serde_yaml::Value::Bool(false),
-            );
-        }
+    if channel_type == "discord" && !cfg.groups.is_empty() {
+        let groups_seq: Vec<serde_yaml::Value> = cfg
+            .groups
+            .iter()
+            .map(|g| serde_yaml::Value::String(g.clone()))
+            .collect();
+        connector_map.insert(
+            serde_yaml::Value::String("groups".into()),
+            serde_yaml::Value::Sequence(groups_seq),
+        );
+    }
+    if !cfg.require_mention {
+        connector_map.insert(
+            serde_yaml::Value::String("require_mention".into()),
+            serde_yaml::Value::Bool(false),
+        );
     }
     let connector_value = serde_yaml::Value::Mapping(connector_map);
 
@@ -749,21 +770,11 @@ fn add_routing_binding(
     channel_type: &str,
     connector_id: &str,
     agent_id: &str,
+    kinds: &[&str],
 ) -> Result<()> {
     let routing_path = config_root.join("config/routing.yaml");
     if !routing_path.exists() {
-        let cfg = ChannelConfig {
-            connector_id: connector_id.to_string(),
-            token: String::new(),
-            groups: Vec::new(),
-            require_mention: true,
-        };
-        let (tg, dc) = match channel_type {
-            "telegram" => (Some(cfg), None),
-            "discord" => (None, Some(cfg)),
-            _ => (None, None),
-        };
-        let yaml = generate_routing_yaml(agent_id, tg, dc);
+        let yaml = generate_routing_yaml(agent_id, channel_type, connector_id, kinds);
         fs::write(&routing_path, yaml)?;
         return Ok(());
     }
@@ -771,34 +782,41 @@ fn add_routing_binding(
     let content = fs::read_to_string(&routing_path)?;
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
 
-    let mut match_map = serde_yaml::Mapping::new();
-    match_map.insert("kind".into(), serde_yaml::Value::String("dm".into()));
-    let mut binding_map = serde_yaml::Mapping::new();
-    binding_map.insert(
-        "channel_type".into(),
-        serde_yaml::Value::String(channel_type.into()),
-    );
-    binding_map.insert(
-        "connector_id".into(),
-        serde_yaml::Value::String(connector_id.into()),
-    );
-    binding_map.insert("match".into(), serde_yaml::Value::Mapping(match_map));
-    binding_map.insert(
-        "agent_id".into(),
-        serde_yaml::Value::String(agent_id.into()),
-    );
-    let new_binding = serde_yaml::Value::Mapping(binding_map);
+    // Build one binding per kind
+    let new_bindings: Vec<serde_yaml::Value> = kinds
+        .iter()
+        .map(|kind| {
+            let mut match_map = serde_yaml::Mapping::new();
+            match_map.insert("kind".into(), serde_yaml::Value::String((*kind).into()));
+            let mut binding_map = serde_yaml::Mapping::new();
+            binding_map.insert(
+                "channel_type".into(),
+                serde_yaml::Value::String(channel_type.into()),
+            );
+            binding_map.insert(
+                "connector_id".into(),
+                serde_yaml::Value::String(connector_id.into()),
+            );
+            binding_map.insert("match".into(), serde_yaml::Value::Mapping(match_map));
+            binding_map.insert(
+                "agent_id".into(),
+                serde_yaml::Value::String(agent_id.into()),
+            );
+            serde_yaml::Value::Mapping(binding_map)
+        })
+        .collect();
 
     if let Some(seq) = doc
         .get_mut("bindings")
         .and_then(|bindings| bindings.as_sequence_mut())
     {
+        // Remove all old bindings for this connector_id
         seq.retain(|binding| {
             binding.get("connector_id").and_then(|v| v.as_str()) != Some(connector_id)
         });
-        seq.push(new_binding);
+        seq.extend(new_bindings);
     } else {
-        doc["bindings"] = serde_yaml::Value::Sequence(vec![new_binding]);
+        doc["bindings"] = serde_yaml::Value::Sequence(new_bindings);
     }
 
     fs::write(&routing_path, serde_yaml::to_string(&doc)?)?;
@@ -1159,6 +1177,9 @@ fn generate_main_yaml(
                 "      - connector_id: {}\n        token: \"{}\"\n",
                 cfg.connector_id, cfg.token
             ));
+            if !cfg.require_mention {
+                out.push_str("        require_mention: false\n");
+            }
         }
         None => {
             out.push_str("  telegram:\n    enabled: false\n    connectors: []\n");
@@ -1196,21 +1217,15 @@ fn generate_main_yaml(
 
 fn generate_routing_yaml(
     default_agent_id: &str,
-    telegram: Option<ChannelConfig>,
-    discord: Option<ChannelConfig>,
+    channel_type: &str,
+    connector_id: &str,
+    kinds: &[&str],
 ) -> String {
     let mut out = format!("default_agent_id: {default_agent_id}\n\nbindings:\n");
 
-    if let Some(cfg) = telegram {
+    for kind in kinds {
         out.push_str(&format!(
-            "  - channel_type: telegram\n    connector_id: {}\n    match:\n      kind: dm\n    agent_id: {}\n",
-            cfg.connector_id, default_agent_id
-        ));
-    }
-    if let Some(cfg) = discord {
-        out.push_str(&format!(
-            "  - channel_type: discord\n    connector_id: {}\n    match:\n      kind: dm\n    agent_id: {}\n",
-            cfg.connector_id, default_agent_id
+            "  - channel_type: {channel_type}\n    connector_id: {connector_id}\n    match:\n      kind: {kind}\n    agent_id: {default_agent_id}\n",
         ));
     }
 
@@ -1231,11 +1246,11 @@ fn unix_timestamp() -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_channel_to_config, build_action_labels, ensure_required_dirs, generate_agent_yaml,
-        generate_main_yaml, generate_provider_yaml, generate_routing_yaml, provider_models_for_id,
-        remove_channel_from_config, remove_routing_binding, validate_generated_config,
-        write_agent_files_unchecked, write_provider_config_unchecked, AuthChoice, ChannelConfig,
-        ProviderId, SetupAction, ALL_PROVIDERS,
+        add_channel_to_config, add_routing_binding, build_action_labels, ensure_required_dirs,
+        generate_agent_yaml, generate_main_yaml, generate_provider_yaml, generate_routing_yaml,
+        provider_models_for_id, remove_channel_from_config, remove_routing_binding,
+        validate_generated_config, write_agent_files_unchecked, write_provider_config_unchecked,
+        AuthChoice, ChannelConfig, ProviderId, SetupAction, ALL_PROVIDERS,
     };
     use crate::setup_scan::ConfigState;
 
@@ -1410,22 +1425,10 @@ mod tests {
     fn remove_routing_binding_preserves_other_bindings() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("config")).unwrap();
-        let initial = generate_routing_yaml(
-            "clawhive-main",
-            Some(ChannelConfig {
-                connector_id: "tg-main".into(),
-                token: "tok1".into(),
-                groups: Vec::new(),
-                require_mention: true,
-            }),
-            Some(ChannelConfig {
-                connector_id: "dc-main".into(),
-                token: "tok2".into(),
-                groups: Vec::new(),
-                require_mention: true,
-            }),
-        );
+        // Generate initial routing with tg-main, then add dc-main
+        let initial = generate_routing_yaml("clawhive-main", "telegram", "tg-main", &["dm"]);
         std::fs::write(temp.path().join("config/routing.yaml"), &initial).unwrap();
+        add_routing_binding(temp.path(), "discord", "dc-main", "clawhive-main", &["dm"]).unwrap();
 
         remove_routing_binding(temp.path(), "dc-main").unwrap();
         let content = std::fs::read_to_string(temp.path().join("config/routing.yaml")).unwrap();
@@ -1435,26 +1438,12 @@ mod tests {
 
     #[test]
     fn routing_yaml_contains_bindings_for_enabled_channels() {
-        let yaml = generate_routing_yaml(
-            "clawhive-main",
-            Some(ChannelConfig {
-                connector_id: "tg-main".to_string(),
-                token: "ignored".to_string(),
-                groups: Vec::new(),
-                require_mention: true,
-            }),
-            Some(ChannelConfig {
-                connector_id: "dc-main".to_string(),
-                token: "ignored".to_string(),
-                groups: Vec::new(),
-                require_mention: true,
-            }),
-        );
+        let yaml = generate_routing_yaml("clawhive-main", "telegram", "tg-main", &["dm", "group"]);
 
         assert!(yaml.contains("channel_type: telegram"));
-        assert!(yaml.contains("channel_type: discord"));
         assert!(yaml.contains("connector_id: tg-main"));
-        assert!(yaml.contains("connector_id: dc-main"));
+        assert!(yaml.contains("kind: dm"));
+        assert!(yaml.contains("kind: group"));
         assert!(yaml.contains("agent_id: clawhive-main"));
     }
 
@@ -1480,7 +1469,7 @@ mod tests {
         .expect("write main.yaml");
         std::fs::write(
             temp.path().join("config/routing.yaml"),
-            generate_routing_yaml("clawhive-main", None, None),
+            "default_agent_id: clawhive-main\n\nbindings: []\n",
         )
         .expect("write routing.yaml");
         std::fs::write(
