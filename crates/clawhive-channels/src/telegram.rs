@@ -236,10 +236,8 @@ impl TelegramBot {
                         }
                         Err(err) => {
                             tracing::error!("gateway error: {err}");
-                            if let Err(send_err) = bot
-                                .send_message(chat_id, "Internal error, please try again later.")
-                                .await
-                            {
+                            let user_msg = format!("Error: {err}");
+                            if let Err(send_err) = bot.send_message(chat_id, &user_msg).await {
                                 tracing::error!("failed to send error message: {send_err}");
                             }
                         }

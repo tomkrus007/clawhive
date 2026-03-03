@@ -359,10 +359,8 @@ impl EventHandler for DiscordHandler {
                 }
                 Err(err) => {
                     tracing::error!("discord gateway error: {err}");
-                    if let Err(send_err) = channel_id
-                        .say(&http, "Internal error, please try again later.")
-                        .await
-                    {
+                    let user_msg = format!("Error: {err}");
+                    if let Err(send_err) = channel_id.say(&http, &user_msg).await {
                         tracing::error!("failed to send discord error message: {send_err}");
                     }
                 }
@@ -479,7 +477,8 @@ impl DiscordHandler {
             }
             Err(err) => {
                 tracing::error!("discord slash command gateway error: {err}");
-                edit_deferred_response(ctx, &cmd, "Internal error, please try again later.").await;
+                let user_msg = format!("Error: {err}");
+                edit_deferred_response(ctx, &cmd, &user_msg).await;
             }
         }
     }
