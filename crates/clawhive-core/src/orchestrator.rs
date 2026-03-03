@@ -26,10 +26,13 @@ use super::schedule_tool::ScheduleTool;
 use super::session::SessionManager;
 use super::shell_tool::ExecuteCommandTool;
 use super::skill::SkillRegistry;
+use super::skill_install_state::SkillInstallState;
 use super::tool::{ConversationMessage, ToolContext, ToolExecutor, ToolRegistry};
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 use super::workspace::Workspace;
+
+const SKILL_INSTALL_USAGE_HINT: &str = "请提供 skill 来源路径或 URL。用法: /skill install <source>";
 
 /// Per-agent workspace runtime state: file store, session I/O, search index.
 struct AgentWorkspaceState {
@@ -69,6 +72,7 @@ pub struct Orchestrator {
     tool_registry: ToolRegistry,
     default_workspace_root: std::path::PathBuf,
     default_access_gate: Arc<AccessGate>,
+    skill_install_state: Arc<SkillInstallState>,
 }
 
 impl Orchestrator {
@@ -198,7 +202,192 @@ impl Orchestrator {
             tool_registry,
             default_workspace_root: effective_project_root,
             default_access_gate,
+            skill_install_state: Arc::new(SkillInstallState::new(900)),
         }
+    }
+
+    async fn handle_skill_analyze_or_install_command(
+        &self,
+        inbound: InboundMessage,
+        source: String,
+        install_requested: bool,
+    ) -> Result<OutboundMessage> {
+        let resolved = super::skill_install::resolve_skill_source(&source).await?;
+        let report = super::skill_install::analyze_skill_source(resolved.local_path())?;
+        let token = self
+            .skill_install_state
+            .create_pending(
+                source,
+                report.clone(),
+                inbound.user_scope.clone(),
+                inbound.conversation_scope.clone(),
+            )
+            .await;
+
+        let mode_text = if install_requested {
+            "Install request analyzed."
+        } else {
+            "Analyze complete."
+        };
+        let text = format!(
+            "{mode_text}\n\n{}\n\nTo continue, run: /skill confirm {}",
+            super::skill_install::render_skill_analysis(&report),
+            token
+        );
+
+        Ok(OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type,
+            connector_id: inbound.connector_id,
+            conversation_scope: inbound.conversation_scope,
+            text,
+            at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
+        })
+    }
+
+    async fn handle_skill_confirm_command(
+        &self,
+        inbound: InboundMessage,
+        agent_id: &str,
+        token: String,
+    ) -> Result<OutboundMessage> {
+        if !self
+            .skill_install_state
+            .is_scope_allowed(&inbound.user_scope)
+        {
+            return Ok(OutboundMessage {
+                trace_id: inbound.trace_id,
+                channel_type: inbound.channel_type,
+                connector_id: inbound.connector_id,
+                conversation_scope: inbound.conversation_scope,
+                text: "You are not authorized to install skills in this environment.".to_string(),
+                at: chrono::Utc::now(),
+                reply_to: None,
+                attachments: vec![],
+            });
+        }
+
+        let Some(pending) = self.skill_install_state.take_if_valid(&token).await else {
+            return Ok(OutboundMessage {
+                trace_id: inbound.trace_id,
+                channel_type: inbound.channel_type,
+                connector_id: inbound.connector_id,
+                conversation_scope: inbound.conversation_scope,
+                text: "Invalid or expired skill install confirmation token.".to_string(),
+                at: chrono::Utc::now(),
+                reply_to: None,
+                attachments: vec![],
+            });
+        };
+
+        if pending.user_scope != inbound.user_scope
+            || pending.conversation_scope != inbound.conversation_scope
+        {
+            return Ok(OutboundMessage {
+                trace_id: inbound.trace_id,
+                channel_type: inbound.channel_type,
+                connector_id: inbound.connector_id,
+                conversation_scope: inbound.conversation_scope,
+                text: "This token belongs to a different user or conversation.".to_string(),
+                at: chrono::Utc::now(),
+                reply_to: None,
+                attachments: vec![],
+            });
+        }
+
+        let super::skill_install_state::PendingSkillInstall {
+            source,
+            report,
+            user_scope: _,
+            conversation_scope: _,
+            created_at: _,
+        } = pending;
+
+        if super::skill_install::has_high_risk_findings(&report) {
+            let Some(registry) = self.approval_registry.as_ref() else {
+                return Ok(OutboundMessage {
+                    trace_id: inbound.trace_id,
+                    channel_type: inbound.channel_type,
+                    connector_id: inbound.connector_id,
+                    conversation_scope: inbound.conversation_scope,
+                    text:
+                        "High-risk skill install requires approval but no approval UI is available."
+                            .to_string(),
+                    at: chrono::Utc::now(),
+                    reply_to: None,
+                    attachments: vec![],
+                });
+            };
+
+            let command = format!("skill install {}", report.skill_name);
+            let trace_id = uuid::Uuid::new_v4();
+            let rx = registry
+                .request(trace_id, command.clone(), agent_id.to_string())
+                .await;
+
+            let _ = self
+                .bus
+                .publish(BusMessage::NeedHumanApproval {
+                    trace_id,
+                    reason: format!(
+                        "High-risk skill install requires approval: {}",
+                        report.skill_name
+                    ),
+                    agent_id: agent_id.to_string(),
+                    command,
+                    network_target: None,
+                    source_channel_type: Some(inbound.channel_type.clone()),
+                    source_connector_id: Some(inbound.connector_id.clone()),
+                    source_conversation_scope: Some(inbound.conversation_scope.clone()),
+                })
+                .await;
+
+            match rx.await {
+                Ok(ApprovalDecision::AllowOnce) | Ok(ApprovalDecision::AlwaysAllow) => {}
+                Ok(ApprovalDecision::Deny) | Err(_) => {
+                    return Ok(OutboundMessage {
+                        trace_id: inbound.trace_id,
+                        channel_type: inbound.channel_type,
+                        connector_id: inbound.connector_id,
+                        conversation_scope: inbound.conversation_scope,
+                        text: "Skill install denied by user.".to_string(),
+                        at: chrono::Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
+                    });
+                }
+            }
+        }
+
+        let resolved = super::skill_install::resolve_skill_source(&source).await?;
+        let installed = super::skill_install::install_skill_from_analysis(
+            &self.workspace_root,
+            &self.skills_root,
+            resolved.local_path(),
+            &report,
+            true,
+        )?;
+
+        let text = format!(
+            "Installed skill '{}' to {} (findings: {}, high-risk: {}).",
+            report.skill_name,
+            installed.target.display(),
+            report.findings.len(),
+            installed.high_risk
+        );
+
+        Ok(OutboundMessage {
+            trace_id: inbound.trace_id,
+            channel_type: inbound.channel_type,
+            connector_id: inbound.connector_id,
+            conversation_scope: inbound.conversation_scope,
+            text,
+            at: chrono::Utc::now(),
+            reply_to: None,
+            attachments: vec![],
+        })
     }
 
     fn workspace_root_for(&self, agent_id: &str) -> std::path::PathBuf {
@@ -481,6 +670,21 @@ impl Orchestrator {
                         attachments: vec![],
                     });
                 }
+                super::slash_commands::SlashCommand::SkillAnalyze { source } => {
+                    return self
+                        .handle_skill_analyze_or_install_command(inbound, source, false)
+                        .await;
+                }
+                super::slash_commands::SlashCommand::SkillInstall { source } => {
+                    return self
+                        .handle_skill_analyze_or_install_command(inbound, source, true)
+                        .await;
+                }
+                super::slash_commands::SlashCommand::SkillConfirm { token } => {
+                    return self
+                        .handle_skill_confirm_command(inbound, agent_id, token)
+                        .await;
+                }
                 super::slash_commands::SlashCommand::New { model_hint } => {
                     // Reset the session: clear history and start fresh
                     let _ = self.session_mgr.reset(&session_key).await;
@@ -510,6 +714,25 @@ impl Orchestrator {
                         .await;
                 }
             }
+        }
+
+        if let Some(source) = detect_skill_install_intent(&inbound.text) {
+            return self
+                .handle_skill_analyze_or_install_command(inbound, source, true)
+                .await;
+        }
+
+        if is_skill_install_intent_without_source(&inbound.text) {
+            return Ok(OutboundMessage {
+                trace_id: inbound.trace_id,
+                channel_type: inbound.channel_type,
+                connector_id: inbound.connector_id,
+                conversation_scope: inbound.conversation_scope,
+                text: SKILL_INSTALL_USAGE_HINT.to_string(),
+                at: chrono::Utc::now(),
+                reply_to: None,
+                attachments: vec![],
+            });
         }
 
         let session_result = self
@@ -1421,6 +1644,86 @@ impl Orchestrator {
             _ => self.file_store_for(agent_id).build_memory_context().await,
         }
     }
+}
+
+fn extract_source_after_prefix(text: &str, prefix: &str) -> Option<String> {
+    let rest = text[prefix.len()..]
+        .trim_start_matches([' ', ':', '\u{ff1a}'])
+        .trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_string())
+    }
+}
+
+fn has_install_skill_intent_prefix(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let en_prefixes = ["install skill from", "install this skill", "install skill"];
+    if en_prefixes.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+
+    let cn_prefixes = [
+        "安装这个skill:",
+        "安装这个 skill:",
+        "安装skill:",
+        "安装 skill:",
+        "安装技能:",
+        "安装这个skill",
+        "安装这个 skill",
+        "安装skill",
+        "安装 skill",
+        "安装技能",
+    ];
+    cn_prefixes.iter().any(|prefix| trimmed.starts_with(prefix))
+}
+
+fn is_skill_install_intent_without_source(text: &str) -> bool {
+    if !has_install_skill_intent_prefix(text) {
+        return false;
+    }
+    detect_skill_install_intent(text).is_none()
+}
+
+pub fn detect_skill_install_intent(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let en_prefixes = ["install skill from", "install this skill", "install skill"];
+    for prefix in en_prefixes {
+        if lower.starts_with(prefix) {
+            return extract_source_after_prefix(trimmed, prefix);
+        }
+    }
+
+    let cn_prefixes = [
+        "安装这个skill:",
+        "安装这个 skill:",
+        "安装skill:",
+        "安装 skill:",
+        "安装技能:",
+        "安装这个skill",
+        "安装这个 skill",
+        "安装skill",
+        "安装 skill",
+        "安装技能",
+    ];
+    for prefix in cn_prefixes {
+        if trimmed.starts_with(prefix) {
+            return extract_source_after_prefix(trimmed, prefix);
+        }
+    }
+
+    None
 }
 
 /// Filter NO_REPLY responses.

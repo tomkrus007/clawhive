@@ -7,6 +7,7 @@ pub mod routing;
 pub mod schedules;
 pub mod sessions;
 pub mod setup;
+pub mod skills;
 
 use axum::Router;
 
@@ -23,4 +24,5 @@ pub fn api_router() -> Router<AppState> {
         .nest("/sessions", sessions::router())
         .nest("/events", events::router())
         .nest("/setup", setup::router())
+        .nest("/skills", skills::router())
 }

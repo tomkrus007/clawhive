@@ -697,6 +697,7 @@ dependencies = [
  "clawhive-scheduler",
  "clawhive-schema",
  "corral-core",
+ "flate2",
  "futures",
  "futures-core",
  "htmd",
@@ -704,12 +705,14 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tar",
  "tempfile",
  "tokio",
  "tokio-stream",
  "tracing",
  "uuid",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

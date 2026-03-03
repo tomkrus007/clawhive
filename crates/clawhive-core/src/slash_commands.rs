@@ -11,11 +11,22 @@ use chrono::Utc;
 pub enum SlashCommand {
     /// /new - Start a fresh session
     /// Optional model hint (e.g., "/new opus")
-    New { model_hint: Option<String> },
+    New {
+        model_hint: Option<String>,
+    },
     /// /model - Show current model info
     Model,
     /// /status - Show session status
     Status,
+    SkillAnalyze {
+        source: String,
+    },
+    SkillInstall {
+        source: String,
+    },
+    SkillConfirm {
+        token: String,
+    },
 }
 
 /// Result of executing a slash command
@@ -50,6 +61,36 @@ pub fn parse_command(text: &str) -> Option<SlashCommand> {
         }
         "/model" => Some(SlashCommand::Model),
         "/status" => Some(SlashCommand::Status),
+        "/skill" => {
+            let action = rest.first().map(|s| s.to_lowercase())?;
+            match action.as_str() {
+                "analyze" => {
+                    let source = rest.get(1..)?.join(" ").trim().to_string();
+                    if source.is_empty() {
+                        None
+                    } else {
+                        Some(SlashCommand::SkillAnalyze { source })
+                    }
+                }
+                "install" => {
+                    let source = rest.get(1..)?.join(" ").trim().to_string();
+                    if source.is_empty() {
+                        None
+                    } else {
+                        Some(SlashCommand::SkillInstall { source })
+                    }
+                }
+                "confirm" => {
+                    let token = rest.get(1..)?.join(" ").trim().to_string();
+                    if token.is_empty() {
+                        None
+                    } else {
+                        Some(SlashCommand::SkillConfirm { token })
+                    }
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -124,6 +165,30 @@ mod tests {
     #[test]
     fn parse_status_command() {
         assert_eq!(parse_command("/status"), Some(SlashCommand::Status));
+    }
+
+    #[test]
+    fn parse_skill_commands() {
+        assert_eq!(
+            parse_command("/skill analyze https://example.com/skill.zip"),
+            Some(SlashCommand::SkillAnalyze {
+                source: "https://example.com/skill.zip".to_string()
+            })
+        );
+        assert_eq!(
+            parse_command("/skill install ./skills/my-skill"),
+            Some(SlashCommand::SkillInstall {
+                source: "./skills/my-skill".to_string()
+            })
+        );
+        assert_eq!(
+            parse_command("/skill confirm tok_123"),
+            Some(SlashCommand::SkillConfirm {
+                token: "tok_123".to_string()
+            })
+        );
+        assert_eq!(parse_command("/skill"), None);
+        assert_eq!(parse_command("/skill install"), None);
     }
 
     #[test]

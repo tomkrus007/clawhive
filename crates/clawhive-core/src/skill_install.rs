@@ -1,0 +1,712 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::io::{Cursor, Write};
+use std::net::{IpAddr, Ipv4Addr};
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::Result;
+
+use crate::skill::SkillPermissions;
+
+#[derive(Debug)]
+pub enum ResolvedSkillSource {
+    Local(PathBuf),
+    Remote {
+        _temp_dir: tempfile::TempDir,
+        path: PathBuf,
+    },
+}
+
+impl ResolvedSkillSource {
+    pub fn local_path(&self) -> &Path {
+        match self {
+            Self::Local(p) => p.as_path(),
+            Self::Remote { path, .. } => path.as_path(),
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct InstallSkillFrontmatter {
+    name: String,
+    description: String,
+    #[serde(default)]
+    permissions: Option<SkillPermissions>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillRiskFinding {
+    pub severity: &'static str,
+    pub file: PathBuf,
+    pub line: usize,
+    pub pattern: &'static str,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillAnalysisReport {
+    pub source: PathBuf,
+    pub skill_name: String,
+    pub description: String,
+    pub permissions: Option<SkillPermissions>,
+    pub findings: Vec<SkillRiskFinding>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallResult {
+    pub target: PathBuf,
+    pub high_risk: bool,
+}
+
+pub async fn resolve_skill_source(source: &str) -> Result<ResolvedSkillSource> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return download_remote_skill(source).await;
+    }
+
+    let local = PathBuf::from(source);
+    if !local.exists() {
+        anyhow::bail!("skill source does not exist: {}", local.display());
+    }
+    Ok(ResolvedSkillSource::Local(local))
+}
+
+pub fn analyze_skill_source(source: &Path) -> Result<SkillAnalysisReport> {
+    let skill_md = source.join("SKILL.md");
+    if !skill_md.exists() {
+        anyhow::bail!("{} missing SKILL.md", source.display());
+    }
+
+    let raw = std::fs::read_to_string(&skill_md)?;
+    let fm = parse_skill_frontmatter(&raw)?;
+
+    let mut findings = Vec::new();
+    scan_path_recursive(source, &mut findings)?;
+
+    Ok(SkillAnalysisReport {
+        source: source.to_path_buf(),
+        skill_name: fm.name,
+        description: fm.description,
+        permissions: fm.permissions,
+        findings,
+    })
+}
+
+pub fn has_high_risk_findings(report: &SkillAnalysisReport) -> bool {
+    report
+        .findings
+        .iter()
+        .any(|f| f.severity == "high" || f.severity == "critical")
+}
+
+pub fn install_skill_from_analysis(
+    config_root: &Path,
+    skills_root: &Path,
+    source: &Path,
+    report: &SkillAnalysisReport,
+    allow_high_risk: bool,
+) -> Result<InstallResult> {
+    const CONTENT_HASH_FILE: &str = ".content-hash";
+
+    let high_risk = has_high_risk_findings(report);
+    if high_risk && !allow_high_risk {
+        anyhow::bail!("high-risk patterns detected; confirmation required before install");
+    }
+
+    let target = skills_root.join(&report.skill_name);
+    let source_hash = compute_directory_content_hash(source)?;
+    let target_hash_path = target.join(CONTENT_HASH_FILE);
+    if target.exists() && target_hash_path.exists() {
+        let installed_hash = std::fs::read_to_string(&target_hash_path)?;
+        if installed_hash.trim() == source_hash {
+            let audit_dir = config_root.join("logs");
+            std::fs::create_dir_all(&audit_dir)?;
+            let audit_path = audit_dir.join("skill-installs.jsonl");
+            let event = serde_json::json!({
+                "ts": chrono::Utc::now().to_rfc3339(),
+                "skill": report.skill_name,
+                "target": target,
+                "findings": report.findings.len(),
+                "high_risk": high_risk,
+                "declared_permissions": report.permissions.is_some(),
+                "skipped": true,
+            });
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(audit_path)?;
+            writeln!(f, "{}", serde_json::to_string(&event)?)?;
+
+            return Ok(InstallResult { target, high_risk });
+        }
+    }
+
+    if target.exists() {
+        std::fs::remove_dir_all(&target)?;
+    }
+    copy_dir_recursive(source, &target)?;
+    std::fs::write(target.join(CONTENT_HASH_FILE), &source_hash)?;
+
+    let audit_dir = config_root.join("logs");
+    std::fs::create_dir_all(&audit_dir)?;
+    let audit_path = audit_dir.join("skill-installs.jsonl");
+    let event = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "skill": report.skill_name,
+        "target": target,
+        "findings": report.findings.len(),
+        "high_risk": high_risk,
+        "declared_permissions": report.permissions.is_some(),
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_path)?;
+    writeln!(f, "{}", serde_json::to_string(&event)?)?;
+
+    Ok(InstallResult { target, high_risk })
+}
+
+pub fn render_skill_analysis(report: &SkillAnalysisReport) -> String {
+    let mut lines = vec![
+        format!("Skill source: {}", report.source.display()),
+        format!("Skill name: {}", report.skill_name),
+        format!("Description: {}", report.description),
+    ];
+
+    match &report.permissions {
+        Some(perms) => {
+            lines.push("Permissions declared in SKILL.md: yes".to_string());
+            lines.extend(render_permissions_lines(perms));
+        }
+        None => {
+            lines.push("Permissions declared in SKILL.md: no".to_string());
+            lines.push(
+                "Effective behavior: default deny-first sandbox policy will be used.".to_string(),
+            );
+        }
+    }
+
+    if report.findings.is_empty() {
+        lines.push("Risk scan: no obvious unsafe patterns found.".to_string());
+    } else {
+        lines.push(format!("Risk scan findings ({}):", report.findings.len()));
+        for f in &report.findings {
+            lines.push(format!(
+                "  [{}] {}:{} pattern='{}' {}",
+                f.severity,
+                f.file.display(),
+                f.line,
+                f.pattern,
+                f.reason
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_permissions_lines(permissions: &SkillPermissions) -> Vec<String> {
+    let mut out = vec!["Requested permissions:".to_string()];
+    if !permissions.fs.read.is_empty() {
+        out.push(format!("  fs.read: {}", permissions.fs.read.join(", ")));
+    }
+    if !permissions.fs.write.is_empty() {
+        out.push(format!("  fs.write: {}", permissions.fs.write.join(", ")));
+    }
+    if !permissions.network.allow.is_empty() {
+        out.push(format!(
+            "  network.allow: {}",
+            permissions.network.allow.join(", ")
+        ));
+    }
+    if !permissions.exec.is_empty() {
+        out.push(format!("  exec: {}", permissions.exec.join(", ")));
+    }
+    if !permissions.env.is_empty() {
+        out.push(format!("  env: {}", permissions.env.join(", ")));
+    }
+    if !permissions.services.is_empty() {
+        out.push(format!(
+            "  services: {}",
+            permissions
+                .services
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    out
+}
+
+async fn download_remote_skill(url: &str) -> Result<ResolvedSkillSource> {
+    const MAX_DOWNLOAD_BYTES: usize = 20 * 1024 * 1024;
+
+    let parsed =
+        reqwest::Url::parse(url).map_err(|e| anyhow::anyhow!("invalid URL '{url}': {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        s => anyhow::bail!("unsupported URL scheme: {s}"),
+    }
+
+    validate_remote_target(&parsed)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+
+    let resp = client.get(parsed.clone()).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("download failed: HTTP {}", resp.status());
+    }
+
+    if let Some(len) = resp.content_length() {
+        if len as usize > MAX_DOWNLOAD_BYTES {
+            anyhow::bail!(
+                "remote file too large: {} bytes (limit {})",
+                len,
+                MAX_DOWNLOAD_BYTES
+            );
+        }
+    }
+
+    let body = resp.bytes().await?;
+    if body.len() > MAX_DOWNLOAD_BYTES {
+        anyhow::bail!(
+            "remote file too large: {} bytes (limit {})",
+            body.len(),
+            MAX_DOWNLOAD_BYTES
+        );
+    }
+
+    let temp = tempfile::tempdir()?;
+    let extract_root = temp.path().join("downloaded-skill");
+    std::fs::create_dir_all(&extract_root)?;
+
+    let path_lc = parsed.path().to_lowercase();
+    if path_lc.ends_with(".zip") {
+        extract_zip_bytes(&body, &extract_root)?;
+    } else if path_lc.ends_with(".tar.gz") || path_lc.ends_with(".tgz") {
+        extract_tar_gz_bytes(&body, &extract_root)?;
+    } else if path_lc.ends_with(".tar") {
+        extract_tar_bytes(&body, &extract_root)?;
+    } else {
+        std::fs::write(extract_root.join("SKILL.md"), &body)?;
+    }
+
+    let skill_root = find_skill_root(&extract_root)?;
+
+    Ok(ResolvedSkillSource::Remote {
+        _temp_dir: temp,
+        path: skill_root,
+    })
+}
+
+fn find_skill_root(root: &Path) -> Result<PathBuf> {
+    if root.join("SKILL.md").exists() {
+        return Ok(root.to_path_buf());
+    }
+
+    let mut hits = Vec::new();
+    find_skill_md_recursive(root, &mut hits)?;
+    if hits.is_empty() {
+        anyhow::bail!("downloaded source does not contain SKILL.md");
+    }
+
+    if hits.len() > 1 {
+        anyhow::bail!(
+            "downloaded source contains multiple SKILL.md files; please provide a single-skill archive"
+        );
+    }
+
+    let only = hits.into_iter().next().expect("single hit should exist");
+    let parent = only
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid SKILL.md path in archive"))?;
+    Ok(parent.to_path_buf())
+}
+
+fn find_skill_md_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_dir() {
+            find_skill_md_recursive(&p, out)?;
+        } else if p.file_name().and_then(|s| s.to_str()) == Some("SKILL.md") {
+            out.push(p);
+        }
+    }
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn is_safe_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && !path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+}
+
+fn extract_zip_bytes(bytes: &[u8], output_dir: &Path) -> Result<()> {
+    let reader = Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)?;
+
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i)?;
+        let Some(raw_name) = f.enclosed_name().map(|p| p.to_path_buf()) else {
+            continue;
+        };
+        if !is_safe_relative_path(&raw_name) {
+            continue;
+        }
+        let outpath = output_dir.join(raw_name);
+        if f.is_dir() {
+            std::fs::create_dir_all(&outpath)?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = std::fs::File::create(&outpath)?;
+            std::io::copy(&mut f, &mut out)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_tar_gz_bytes(bytes: &[u8], output_dir: &Path) -> Result<()> {
+    let cursor = Cursor::new(bytes);
+    let decoder = flate2::read::GzDecoder::new(cursor);
+    let mut archive = tar::Archive::new(decoder);
+    unpack_tar_archive(&mut archive, output_dir)
+}
+
+fn extract_tar_bytes(bytes: &[u8], output_dir: &Path) -> Result<()> {
+    let cursor = Cursor::new(bytes);
+    let mut archive = tar::Archive::new(cursor);
+    unpack_tar_archive(&mut archive, output_dir)
+}
+
+#[doc(hidden)]
+pub fn unpack_tar_archive<R: std::io::Read>(
+    archive: &mut tar::Archive<R>,
+    output_dir: &Path,
+) -> Result<()> {
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let entry_type = entry.header().entry_type();
+        if !matches!(
+            entry_type,
+            tar::EntryType::Regular | tar::EntryType::Directory
+        ) {
+            continue;
+        }
+
+        let path = entry.path()?.to_path_buf();
+        if !is_safe_relative_path(&path) {
+            continue;
+        }
+        let outpath = output_dir.join(path);
+        if let Some(parent) = outpath.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        entry.unpack(&outpath)?;
+    }
+    Ok(())
+}
+
+fn parse_skill_frontmatter(raw: &str) -> Result<InstallSkillFrontmatter> {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with("---") {
+        anyhow::bail!("SKILL.md must start with YAML frontmatter (---)");
+    }
+    let after_first = &trimmed[3..];
+    let end = after_first
+        .find("---")
+        .ok_or_else(|| anyhow::anyhow!("no closing --- for frontmatter"))?;
+    let yaml_str = &after_first[..end];
+    let fm: InstallSkillFrontmatter =
+        serde_yaml::from_str(yaml_str).map_err(|e| anyhow::anyhow!("invalid frontmatter: {e}"))?;
+    Ok(fm)
+}
+
+fn scan_path_recursive(dir: &Path, findings: &mut Vec<SkillRiskFinding>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.file_name().and_then(|s| s.to_str()) == Some(".git") {
+            continue;
+        }
+        if path.is_dir() {
+            scan_path_recursive(&path, findings)?;
+            continue;
+        }
+
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            for (i, line) in text.lines().enumerate() {
+                scan_line(&path, i + 1, line, findings);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scan_line(path: &Path, line_no: usize, line: &str, findings: &mut Vec<SkillRiskFinding>) {
+    let checks: [(&str, &str, &str, &str); 9] = [
+        (
+            "critical",
+            "rm -rf /",
+            "dangerous delete",
+            "Destructive filesystem wipe command",
+        ),
+        (
+            "critical",
+            "mkfs",
+            "disk format",
+            "Potential disk formatting command",
+        ),
+        (
+            "high",
+            "curl",
+            "remote fetch",
+            "Network fetch command found; verify intent",
+        ),
+        (
+            "high",
+            "wget",
+            "remote fetch",
+            "Network fetch command found; verify intent",
+        ),
+        (
+            "high",
+            "| sh",
+            "pipe-to-shell",
+            "Piping content to shell can execute untrusted code",
+        ),
+        (
+            "high",
+            "base64 -d",
+            "obfuscation",
+            "Potential obfuscated payload decode",
+        ),
+        (
+            "high",
+            "sudo ",
+            "privilege escalation",
+            "Privilege escalation command detected",
+        ),
+        (
+            "medium",
+            "~/.ssh",
+            "secret path",
+            "Accessing SSH config/key paths",
+        ),
+        (
+            "medium",
+            "~/.aws",
+            "secret path",
+            "Accessing cloud credential paths",
+        ),
+    ];
+
+    let normalized = line.to_lowercase();
+    for (severity, pattern, _reason, detail) in checks {
+        if normalized.contains(&pattern.to_lowercase()) {
+            findings.push(SkillRiskFinding {
+                severity,
+                file: path.to_path_buf(),
+                line: line_no,
+                pattern,
+                reason: detail,
+            });
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_recursive(&path, &target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_remote_target(parsed: &reqwest::Url) -> Result<()> {
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("URL must include a host"))?;
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
+
+    if normalized_host.eq_ignore_ascii_case("localhost") {
+        anyhow::bail!("blocked remote URL target: localhost");
+    }
+
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("URL missing port for scheme"))?;
+
+    let mut resolved_ips = Vec::new();
+    if let Ok(ip) = normalized_host.parse::<IpAddr>() {
+        resolved_ips.push(ip);
+    } else {
+        let addrs = std::net::ToSocketAddrs::to_socket_addrs(&(normalized_host, port))
+            .map_err(|e| anyhow::anyhow!("failed to resolve host '{host}': {e}"))?;
+        for addr in addrs {
+            resolved_ips.push(addr.ip());
+        }
+    }
+
+    if resolved_ips.is_empty() {
+        anyhow::bail!("failed to resolve host '{host}'");
+    }
+
+    for ip in resolved_ips {
+        if is_blocked_remote_ip(ip) {
+            anyhow::bail!("blocked remote URL target: {host} resolved to {ip}");
+        }
+    }
+
+    Ok(())
+}
+
+fn is_blocked_remote_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() {
+                return true;
+            }
+            let [a, b, ..] = v4.octets();
+            a == 127
+                || a == 10
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 169 && b == 254)
+                || v4 == Ipv4Addr::new(169, 254, 169, 254)
+        }
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+fn compute_directory_content_hash(root: &Path) -> Result<String> {
+    let mut hasher = DefaultHasher::new();
+    hash_directory_recursive(root, root, &mut hasher)?;
+    Ok(format!("{:016x}", hasher.finish()))
+}
+
+fn hash_directory_recursive(root: &Path, dir: &Path, hasher: &mut DefaultHasher) -> Result<()> {
+    let mut entries: Vec<_> =
+        std::fs::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            hash_directory_recursive(root, &path, hasher)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|e| anyhow::anyhow!("failed to hash '{}': {e}", path.display()))?;
+        relative.to_string_lossy().hash(hasher);
+
+        let content = std::fs::read(&path)?;
+        content.len().hash(hasher);
+        hasher.write(&content);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resolve_skill_source_local_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("skill");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("SKILL.md"),
+            "---\nname: local-skill\ndescription: Local\n---\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_skill_source(src.to_str().unwrap()).await.unwrap();
+        assert_eq!(resolved.local_path(), src.as_path());
+    }
+
+    #[test]
+    fn analyze_requires_skill_md() {
+        let temp = tempfile::tempdir().unwrap();
+        let err = analyze_skill_source(temp.path()).unwrap_err().to_string();
+        assert!(err.contains("missing SKILL.md"));
+    }
+
+    #[test]
+    fn install_rejects_high_risk_without_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: risky\ndescription: test\n---\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("install.sh"), "curl https://example.com").unwrap();
+
+        let report = analyze_skill_source(&source).unwrap();
+        assert!(has_high_risk_findings(&report));
+
+        let config_root = temp.path().join("config");
+        let skills_root = temp.path().join("skills");
+        let err = install_skill_from_analysis(&config_root, &skills_root, &source, &report, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("high-risk"));
+    }
+
+    #[test]
+    fn install_writes_audit_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("SKILL.md"),
+            "---\nname: safe\ndescription: test\n---\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("README.md"), "hello").unwrap();
+
+        let report = analyze_skill_source(&source).unwrap();
+        let config_root = temp.path().join("config");
+        let skills_root = temp.path().join("skills");
+        let result =
+            install_skill_from_analysis(&config_root, &skills_root, &source, &report, false)
+                .unwrap();
+
+        assert!(result.target.exists());
+        let audit = config_root.join("logs").join("skill-installs.jsonl");
+        let content = std::fs::read_to_string(audit).unwrap();
+        assert!(content.contains("\"skill\":\"safe\""));
+    }
+}
