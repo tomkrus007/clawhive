@@ -46,6 +46,14 @@ impl std::fmt::Display for ToolOrigin {
 pub struct HardBaseline;
 
 impl HardBaseline {
+    pub fn is_cloud_metadata(host: &str, _port: u16) -> bool {
+        let host_lower = host.to_lowercase();
+        matches!(
+            host_lower.as_str(),
+            "169.254.169.254" | "metadata.google.internal" | "metadata.goog"
+        )
+    }
+
     /// Check if a network target is denied (SSRF protection).
     ///
     /// Blocks:
@@ -68,12 +76,7 @@ impl HardBaseline {
                 .is_some_and(|n| (16..=31).contains(&n));
 
         // Loopback and special hostnames
-        let denied_hosts = [
-            "localhost",
-            "metadata.google.internal",
-            "metadata.goog",
-            "169.254.169.254", // AWS/GCP metadata
-        ];
+        let denied_hosts = ["localhost"];
 
         // Internal domain suffixes
         let denied_suffixes = [".internal", ".local", ".localhost"];
@@ -84,6 +87,7 @@ impl HardBaseline {
             || denied_suffixes.iter().any(|s| host_lower.ends_with(s))
             || host_lower == "::1"
             || host_lower.starts_with("fe80:")
+            || Self::is_cloud_metadata(host, _port)
     }
 
     /// Check if a path is denied for writing.
@@ -212,6 +216,7 @@ pub struct PolicyContext {
     permissions: Option<corral_core::Permissions>,
     /// Master security mode
     security_mode: SecurityMode,
+    private_overrides: Vec<String>,
 }
 
 impl PolicyContext {
@@ -221,6 +226,7 @@ impl PolicyContext {
             origin: ToolOrigin::Builtin,
             permissions: None,
             security_mode: SecurityMode::Standard,
+            private_overrides: Vec::new(),
         }
     }
 
@@ -230,6 +236,16 @@ impl PolicyContext {
             origin: ToolOrigin::Builtin,
             permissions: None,
             security_mode: mode,
+            private_overrides: Vec::new(),
+        }
+    }
+
+    pub fn builtin_with_private_overrides(mode: SecurityMode, overrides: Vec<String>) -> Self {
+        Self {
+            origin: ToolOrigin::Builtin,
+            permissions: None,
+            security_mode: mode,
+            private_overrides: Self::normalize_private_overrides(overrides),
         }
     }
 
@@ -239,6 +255,7 @@ impl PolicyContext {
             origin: ToolOrigin::External,
             permissions: Some(permissions),
             security_mode: SecurityMode::Standard,
+            private_overrides: Vec::new(),
         }
     }
 
@@ -251,6 +268,20 @@ impl PolicyContext {
             origin: ToolOrigin::External,
             permissions: Some(permissions),
             security_mode: mode,
+            private_overrides: Vec::new(),
+        }
+    }
+
+    pub fn external_with_security_and_private_overrides(
+        permissions: corral_core::Permissions,
+        mode: SecurityMode,
+        overrides: Vec<String>,
+    ) -> Self {
+        Self {
+            origin: ToolOrigin::External,
+            permissions: Some(permissions),
+            security_mode: mode,
+            private_overrides: Self::normalize_private_overrides(overrides),
         }
     }
 
@@ -268,13 +299,24 @@ impl PolicyContext {
 
         // 1. Hard baseline always applies
         if HardBaseline::network_denied(host, port) {
-            tracing::debug!(
+            let target = format!("{}:{}", host.to_lowercase(), port);
+            let allow_private = self.private_overrides.iter().any(|v| v == &target);
+            if HardBaseline::is_cloud_metadata(host, port) || !allow_private {
+                tracing::debug!(
+                    host,
+                    port,
+                    origin = %self.origin,
+                    "network access denied by hard baseline"
+                );
+                return false;
+            }
+
+            tracing::warn!(
                 host,
                 port,
                 origin = %self.origin,
-                "network access denied by hard baseline"
+                "network access allowed by dangerous private override"
             );
-            return false;
         }
 
         // 2. Origin-based check
@@ -413,6 +455,14 @@ impl PolicyContext {
                 || allowed == cmd_basename
                 || (allowed.ends_with('*') && cmd_name.starts_with(&allowed[..allowed.len() - 1]))
         })
+    }
+
+    fn normalize_private_overrides(overrides: Vec<String>) -> Vec<String> {
+        overrides
+            .into_iter()
+            .map(|v| v.trim().to_lowercase())
+            .filter(|v| !v.is_empty())
+            .collect()
     }
 
     /// Simple glob matching for permission patterns.
@@ -653,5 +703,46 @@ mod tests {
         let ctx = PolicyContext::builtin_with_security(SecurityMode::Standard);
         assert!(!ctx.check_network("192.168.1.1", 80));
         assert!(!ctx.check_exec("rm -rf /"));
+    }
+
+    #[test]
+    fn dangerous_allow_private_bypasses_hard_baseline() {
+        let ctx = PolicyContext::builtin_with_private_overrides(
+            SecurityMode::Standard,
+            vec!["127.0.0.1:11434".into(), "192.168.1.50:5432".into()],
+        );
+        assert!(ctx.check_network("127.0.0.1", 11434));
+        assert!(ctx.check_network("192.168.1.50", 5432));
+        assert!(!ctx.check_network("127.0.0.1", 3000));
+        assert!(!ctx.check_network("192.168.1.1", 80));
+    }
+
+    #[test]
+    fn cloud_metadata_never_overridable() {
+        let ctx = PolicyContext::builtin_with_private_overrides(
+            SecurityMode::Standard,
+            vec!["169.254.169.254:80".into()],
+        );
+        assert!(!ctx.check_network("169.254.169.254", 80));
+        assert!(!ctx.check_network("metadata.google.internal", 80));
+    }
+
+    #[test]
+    fn is_cloud_metadata_detects_aws() {
+        assert!(HardBaseline::is_cloud_metadata("169.254.169.254", 80));
+    }
+
+    #[test]
+    fn is_cloud_metadata_detects_gcp() {
+        assert!(HardBaseline::is_cloud_metadata(
+            "metadata.google.internal",
+            80
+        ));
+        assert!(HardBaseline::is_cloud_metadata("metadata.goog", 80));
+    }
+
+    #[test]
+    fn is_cloud_metadata_normal_host_returns_false() {
+        assert!(!HardBaseline::is_cloud_metadata("github.com", 443));
     }
 }

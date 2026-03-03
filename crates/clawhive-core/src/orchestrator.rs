@@ -665,6 +665,11 @@ impl Orchestrator {
             inbound.connector_id.clone(),
             inbound.conversation_scope.clone(),
         ));
+        let private_network_overrides = agent
+            .sandbox
+            .as_ref()
+            .map(|s| s.dangerous_allow_private.clone())
+            .unwrap_or_default();
         let (resp, _messages) = self
             .tool_use_loop(
                 agent_id,
@@ -676,6 +681,7 @@ impl Orchestrator {
                 allowed.as_deref(),
                 merged_permissions,
                 agent.security.clone(),
+                private_network_overrides,
                 source_info,
             )
             .await?;
@@ -889,6 +895,11 @@ impl Orchestrator {
             inbound.connector_id.clone(),
             inbound.conversation_scope.clone(),
         ));
+        let private_network_overrides_stream = agent
+            .sandbox
+            .as_ref()
+            .map(|s| s.dangerous_allow_private.clone())
+            .unwrap_or_default();
         let (_resp, final_messages) = self
             .tool_use_loop(
                 agent_id,
@@ -900,6 +911,7 @@ impl Orchestrator {
                 allowed_stream.as_deref(),
                 merged_permissions,
                 agent.security.clone(),
+                private_network_overrides_stream,
                 source_info_stream,
             )
             .await?;
@@ -956,6 +968,7 @@ impl Orchestrator {
         allowed_tools: Option<&[String]>,
         merged_permissions: Option<corral_core::Permissions>,
         security_mode: SecurityMode,
+        private_network_overrides: Vec<String>,
         source_info: Option<(String, String, String)>, // (channel_type, connector_id, conversation_scope)
     ) -> Result<(clawhive_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
@@ -1052,10 +1065,15 @@ impl Orchestrator {
             // - With permissions: external skill context (sandboxed)
             // - Without: builtin context (trusted, only hard baseline checks)
             let ctx = match merged_permissions.as_ref() {
-                Some(perms) => {
-                    ToolContext::external_with_security(perms.clone(), security_mode.clone())
-                }
-                None => ToolContext::builtin_with_security(security_mode.clone()),
+                Some(perms) => ToolContext::external_with_security_and_private_overrides(
+                    perms.clone(),
+                    security_mode.clone(),
+                    private_network_overrides.clone(),
+                ),
+                None => ToolContext::builtin_with_security_and_private_overrides(
+                    security_mode.clone(),
+                    private_network_overrides.clone(),
+                ),
             }
             .with_recent_messages(recent_messages);
             let ctx = if let Some((ref ch, ref co, ref cv)) = source_info {
@@ -1268,6 +1286,11 @@ impl Orchestrator {
                 agent.tool_policy.as_ref().map(|tp| tp.allow.as_slice()),
                 None,
                 agent.security.clone(),
+                agent
+                    .sandbox
+                    .as_ref()
+                    .map(|s| s.dangerous_allow_private.clone())
+                    .unwrap_or_default(),
                 source_info,
             )
             .await?;
