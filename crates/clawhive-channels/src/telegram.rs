@@ -95,6 +95,9 @@ impl TelegramBot {
             BotCommand::new("status", "Show session status"),
             BotCommand::new("model", "Show current model info"),
             BotCommand::new("help", "Show available commands"),
+            BotCommand::new("skill_analyze", "Analyze a skill before installing"),
+            BotCommand::new("skill_install", "Install a skill (analyze first)"),
+            BotCommand::new("skill_confirm", "Confirm a pending skill installation"),
         ];
         if let Err(e) = bot.set_my_commands(commands).await {
             tracing::warn!("Failed to register Telegram bot commands: {e}");
@@ -141,11 +144,17 @@ impl TelegramBot {
 
             async move {
                 let has_photo = msg.photo().is_some();
-                let text = msg
+                let mut text = msg
                     .text()
                     .or_else(|| msg.caption())
                     .unwrap_or("")
                     .to_string();
+
+                // Normalize Telegram-style underscore commands to space format
+                text = text
+                    .replacen("/skill_analyze", "/skill analyze", 1)
+                    .replacen("/skill_install", "/skill install", 1)
+                    .replacen("/skill_confirm", "/skill confirm", 1);
 
                 // Skip messages with no text and no photo
                 if text.is_empty() && !has_photo {

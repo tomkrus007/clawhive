@@ -12,6 +12,7 @@ use serenity::all::{
     GatewayIntents, Http, Interaction, Message, Ready,
 };
 use serenity::async_trait;
+use serenity::model::application::CommandDataOptionValue;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -186,6 +187,53 @@ impl EventHandler for DiscordHandler {
             CreateCommand::new("status").description("Show session status"),
             CreateCommand::new("model").description("Show current model info"),
             CreateCommand::new("help").description("Show available commands"),
+            CreateCommand::new("skill")
+                .description("Manage skills")
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::SubCommand,
+                        "analyze",
+                        "Analyze a skill before installing",
+                    )
+                    .add_sub_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "source",
+                            "Skill source (URL or path)",
+                        )
+                        .required(true),
+                    ),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::SubCommand,
+                        "install",
+                        "Install a skill (analyze first)",
+                    )
+                    .add_sub_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "source",
+                            "Skill source (URL or path)",
+                        )
+                        .required(true),
+                    ),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::SubCommand,
+                        "confirm",
+                        "Confirm a pending skill installation",
+                    )
+                    .add_sub_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "token",
+                            "Confirmation token from analyze/install",
+                        )
+                        .required(true),
+                    ),
+                ),
         ];
         if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
             tracing::warn!("Failed to register Discord slash commands: {e}");
@@ -380,12 +428,30 @@ impl DiscordHandler {
                     None => "/new".to_string(),
                 }
             }
+            "skill" => {
+                // Extract subcommand and its argument
+                let mut text = "/skill".to_string();
+                if let Some(sub_option) = cmd.data.options.first() {
+                    let subname = sub_option.name.as_str();
+                    if let CommandDataOptionValue::SubCommand(sub_options) = &sub_option.value {
+                        if let Some(arg_option) = sub_options.first() {
+                            if let Some(arg_value) = arg_option.value.as_str() {
+                                text = format!("/skill {subname} {arg_value}");
+                            }
+                        }
+                    }
+                }
+                text
+            }
             "help" => {
                 // /help replies directly, doesn't go through gateway
                 let help_text = "**Available Commands**\n\
                     /new — Start a fresh session\n\
                     /status — Show session status\n\
-                    /model — Show current model info";
+                    /model — Show current model info\n\
+                    /skill analyze <source> — Analyze a skill\n\
+                    /skill install <source> — Install a skill\n\
+                    /skill confirm <token> — Confirm installation";
                 respond_to_interaction(ctx, &cmd, help_text).await;
                 return;
             }
