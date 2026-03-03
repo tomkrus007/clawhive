@@ -51,6 +51,8 @@ pub enum SessionEntry {
 pub struct SessionMessage {
     pub role: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 /// Append-only writer for session JSONL files
@@ -103,6 +105,7 @@ impl SessionWriter {
             message: SessionMessage {
                 role: role.to_owned(),
                 content: content.to_owned(),
+                timestamp: None,
             },
         };
         self.append(session_id, entry).await
@@ -150,7 +153,12 @@ impl SessionReader {
         let mut messages: Vec<SessionMessage> = entries
             .into_iter()
             .filter_map(|entry| match entry {
-                SessionEntry::Message { message, .. } => Some(message),
+                SessionEntry::Message {
+                    message, timestamp, ..
+                } => Some(SessionMessage {
+                    timestamp: Some(timestamp),
+                    ..message
+                }),
                 _ => None,
             })
             .collect();
@@ -338,6 +346,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_load_recent_messages_preserves_entry_timestamps() {
+        let tmp = TempDir::new().expect("tempdir");
+        let writer = SessionWriter::new(tmp.path());
+        let reader = SessionReader::new(tmp.path());
+        writer
+            .start_session("s1", "main")
+            .await
+            .expect("start session");
+
+        let ts1 = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .expect("ts1")
+            .with_timezone(&Utc);
+        let ts2 = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:45:00Z")
+            .expect("ts2")
+            .with_timezone(&Utc);
+
+        writer
+            .append(
+                "s1",
+                SessionEntry::Message {
+                    id: "m1".to_owned(),
+                    timestamp: ts1,
+                    message: SessionMessage {
+                        role: "user".to_owned(),
+                        content: "hello".to_owned(),
+                        timestamp: None,
+                    },
+                },
+            )
+            .await
+            .expect("m1");
+        writer
+            .append(
+                "s1",
+                SessionEntry::Message {
+                    id: "m2".to_owned(),
+                    timestamp: ts2,
+                    message: SessionMessage {
+                        role: "assistant".to_owned(),
+                        content: "hi".to_owned(),
+                        timestamp: None,
+                    },
+                },
+            )
+            .await
+            .expect("m2");
+
+        let messages = reader
+            .load_recent_messages("s1", 10)
+            .await
+            .expect("load recent");
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].timestamp, Some(ts1));
+        assert_eq!(messages[1].timestamp, Some(ts2));
+    }
+
+    #[test]
+    fn test_session_message_deserialize_without_timestamp_defaults_to_none() {
+        let msg: SessionMessage = serde_json::from_str(r#"{"role":"user","content":"hello"}"#)
+            .expect("deserialize session message");
+
+        assert_eq!(msg.timestamp, None);
+    }
+
+    #[tokio::test]
     async fn test_load_all_entries() {
         let tmp = TempDir::new().expect("tempdir");
         let writer = SessionWriter::new(tmp.path());
@@ -441,6 +515,7 @@ mod tests {
                     message: SessionMessage {
                         role: "user".to_owned(),
                         content: "hello".to_owned(),
+                        timestamp: None,
                     },
                 },
             )

@@ -262,6 +262,21 @@ async fn download_remote_skill(url: &str) -> Result<ResolvedSkillSource> {
         anyhow::bail!("download failed: HTTP {}", resp.status());
     }
 
+    // Detect HTML responses (e.g. GitHub tree pages) before downloading body
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    if content_type.contains("text/html") {
+        anyhow::bail!(
+            "URL returned an HTML page instead of a downloadable skill. \
+If this is a GitHub repository, use the raw URL or a .zip/.tar.gz archive link instead.\n\
+Example: https://github.com/user/repo/archive/refs/heads/main.tar.gz"
+        );
+    }
+
     if let Some(len) = resp.content_length() {
         if len as usize > MAX_DOWNLOAD_BYTES {
             anyhow::bail!(

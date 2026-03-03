@@ -27,6 +27,10 @@ pub enum SlashCommand {
     SkillConfirm {
         token: String,
     },
+    /// /skill <subcommand> without required arguments
+    SkillUsageHint {
+        subcommand: String,
+    },
 }
 
 /// Result of executing a slash command
@@ -62,33 +66,56 @@ pub fn parse_command(text: &str) -> Option<SlashCommand> {
         "/model" => Some(SlashCommand::Model),
         "/status" => Some(SlashCommand::Status),
         "/skill" => {
-            let action = rest.first().map(|s| s.to_lowercase())?;
-            match action.as_str() {
-                "analyze" => {
-                    let source = rest.get(1..)?.join(" ").trim().to_string();
+            let action = rest.first().map(|s| s.to_lowercase());
+            match action.as_deref() {
+                Some("analyze") => {
+                    let source = rest
+                        .get(1..)
+                        .map(|s| s.join(" "))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
                     if source.is_empty() {
-                        None
+                        Some(SlashCommand::SkillUsageHint {
+                            subcommand: "analyze".to_string(),
+                        })
                     } else {
                         Some(SlashCommand::SkillAnalyze { source })
                     }
                 }
-                "install" => {
-                    let source = rest.get(1..)?.join(" ").trim().to_string();
+                Some("install") => {
+                    let source = rest
+                        .get(1..)
+                        .map(|s| s.join(" "))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
                     if source.is_empty() {
-                        None
+                        Some(SlashCommand::SkillUsageHint {
+                            subcommand: "install".to_string(),
+                        })
                     } else {
                         Some(SlashCommand::SkillInstall { source })
                     }
                 }
-                "confirm" => {
-                    let token = rest.get(1..)?.join(" ").trim().to_string();
+                Some("confirm") => {
+                    let token = rest
+                        .get(1..)
+                        .map(|s| s.join(" "))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string();
                     if token.is_empty() {
-                        None
+                        Some(SlashCommand::SkillUsageHint {
+                            subcommand: "confirm".to_string(),
+                        })
                     } else {
                         Some(SlashCommand::SkillConfirm { token })
                     }
                 }
-                _ => None,
+                Some(_) | None => Some(SlashCommand::SkillUsageHint {
+                    subcommand: String::new(),
+                }),
             }
         }
         _ => None,
@@ -187,8 +214,27 @@ mod tests {
                 token: "tok_123".to_string()
             })
         );
-        assert_eq!(parse_command("/skill"), None);
-        assert_eq!(parse_command("/skill install"), None);
+        // /skill without subcommand returns usage hint
+        assert_eq!(
+            parse_command("/skill"),
+            Some(SlashCommand::SkillUsageHint {
+                subcommand: String::new()
+            })
+        );
+        // /skill install without source returns usage hint
+        assert_eq!(
+            parse_command("/skill install"),
+            Some(SlashCommand::SkillUsageHint {
+                subcommand: "install".to_string()
+            })
+        );
+        // /skill analyze without source returns usage hint
+        assert_eq!(
+            parse_command("/skill analyze"),
+            Some(SlashCommand::SkillUsageHint {
+                subcommand: "analyze".to_string()
+            })
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use clawhive_bus::BusPublisher;
 use clawhive_memory::embedding::EmbeddingProvider;
 use clawhive_memory::file_store::MemoryFileStore;
 use clawhive_memory::search_index::SearchIndex;
-use clawhive_memory::MemoryStore;
+use clawhive_memory::{MemoryStore, SessionMessage};
 use clawhive_memory::{SessionReader, SessionWriter};
 use clawhive_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
 use clawhive_runtime::TaskExecutor;
@@ -685,6 +685,24 @@ impl Orchestrator {
                         .handle_skill_confirm_command(inbound, agent_id, token)
                         .await;
                 }
+                super::slash_commands::SlashCommand::SkillUsageHint { subcommand } => {
+                    let hint = match subcommand.as_str() {
+                        "analyze" => "Usage: /skill analyze <url-or-path>\nExample: /skill analyze https://example.com/my-skill.zip",
+                        "install" => "Usage: /skill install <url-or-path>\nExample: /skill install https://example.com/my-skill.zip",
+                        "confirm" => "Usage: /skill confirm <token>\nThe token is provided after running /skill analyze or /skill install.",
+                        _ => "Usage:\n  /skill analyze <source> — Analyze a skill before installing\n  /skill install <source> — Install a skill\n  /skill confirm <token> — Confirm a pending installation",
+                    };
+                    return Ok(OutboundMessage {
+                        trace_id: inbound.trace_id,
+                        channel_type: inbound.channel_type,
+                        connector_id: inbound.connector_id,
+                        conversation_scope: inbound.conversation_scope,
+                        text: hint.to_string(),
+                        at: chrono::Utc::now(),
+                        reply_to: None,
+                        attachments: vec![],
+                    });
+                }
                 super::slash_commands::SlashCommand::New { model_hint } => {
                     // Reset the session: clear history and start fresh
                     let _ = self.session_mgr.reset(&session_key).await;
@@ -742,6 +760,11 @@ impl Orchestrator {
 
         if session_result.expired_previous {
             self.try_fallback_summary(agent_id, &session_key, agent)
+                .await;
+            // Clear stale JSONL so expired sessions start fresh
+            let _ = self
+                .session_writer_for(agent_id)
+                .clear_session(&session_key.0)
                 .await;
         }
 
@@ -840,15 +863,7 @@ impl Orchestrator {
         };
 
         // Build messages from history (no fake memory dialogue)
-        let mut messages = Vec::new();
-        for hist_msg in &history_messages {
-            messages.push(LlmMessage {
-                role: hist_msg.role.clone(),
-                content: vec![clawhive_provider::ContentBlock::Text {
-                    text: hist_msg.content.clone(),
-                }],
-            });
-        }
+        let mut messages = build_messages_from_history(&history_messages);
         {
             let preprocessed = self.runtime.preprocess_input(&inbound.text).await?;
             let image_blocks: Vec<ContentBlock> = inbound
@@ -986,6 +1001,11 @@ impl Orchestrator {
         if session_result.expired_previous {
             self.try_fallback_summary(agent_id, &session_key, agent)
                 .await;
+            // Clear stale JSONL so expired sessions start fresh
+            let _ = self
+                .session_writer_for(agent_id)
+                .clear_session(&session_key.0)
+                .await;
         }
 
         let system_prompt = self
@@ -1070,15 +1090,7 @@ impl Orchestrator {
         };
 
         // Build messages from history (no fake memory dialogue, stream variant)
-        let mut messages = Vec::new();
-        for hist_msg in &history_messages {
-            messages.push(LlmMessage {
-                role: hist_msg.role.clone(),
-                content: vec![clawhive_provider::ContentBlock::Text {
-                    text: hist_msg.content.clone(),
-                }],
-            });
-        }
+        let mut messages = build_messages_from_history(&history_messages);
         {
             let preprocessed = self.runtime.preprocess_input(&inbound.text).await?;
             let image_blocks: Vec<ContentBlock> = inbound
@@ -1646,6 +1658,52 @@ impl Orchestrator {
     }
 }
 
+fn build_messages_from_history(history_messages: &[SessionMessage]) -> Vec<LlmMessage> {
+    let mut messages = Vec::new();
+    let mut prev_timestamp = None;
+
+    for hist_msg in history_messages {
+        if let (Some(prev_ts), Some(curr_ts)) = (prev_timestamp, hist_msg.timestamp) {
+            let gap: chrono::TimeDelta = curr_ts - prev_ts;
+            if gap.num_minutes() >= 30 {
+                let gap_text = format_time_gap(gap);
+                messages.push(LlmMessage {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::Text {
+                        text: format!(
+                            "[{gap_text} of inactivity has passed since the last message]"
+                        ),
+                    }],
+                });
+            }
+        }
+
+        prev_timestamp = hist_msg.timestamp;
+
+        messages.push(LlmMessage {
+            role: hist_msg.role.clone(),
+            content: vec![ContentBlock::Text {
+                text: hist_msg.content.clone(),
+            }],
+        });
+    }
+
+    messages
+}
+
+fn format_time_gap(gap: chrono::TimeDelta) -> String {
+    let hours = gap.num_hours();
+    let minutes = gap.num_minutes();
+    if hours >= 24 {
+        let days = hours / 24;
+        format!("{days} day(s)")
+    } else if hours >= 1 {
+        format!("{hours} hour(s)")
+    } else {
+        format!("{minutes} minute(s)")
+    }
+}
+
 fn extract_source_after_prefix(text: &str, prefix: &str) -> Option<String> {
     let rest = text[prefix.len()..]
         .trim_start_matches([' ', ':', '\u{ff1a}'])
@@ -1858,6 +1916,8 @@ fn format_group_context_md(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+    use clawhive_memory::SessionMessage;
 
     #[test]
     fn merged_permissions_in_normal_mode_use_all_active_skills() {
@@ -1899,5 +1959,47 @@ Body"#,
         let perms = merged.expect("expected merged permissions in normal mode");
         assert!(perms.network.allow.contains(&"api.a.com:443".to_string()));
         assert!(perms.network.allow.contains(&"api.b.com:443".to_string()));
+    }
+
+    #[test]
+    fn format_time_gap_prefers_days_hours_minutes() {
+        assert_eq!(format_time_gap(Duration::minutes(45)), "45 minute(s)");
+        assert_eq!(format_time_gap(Duration::hours(3)), "3 hour(s)");
+        assert_eq!(format_time_gap(Duration::hours(49)), "2 day(s)");
+    }
+
+    #[test]
+    fn build_history_messages_inserts_inactivity_markers() {
+        let history = vec![
+            SessionMessage {
+                role: "user".to_string(),
+                content: "first".to_string(),
+                timestamp: Some(Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap()),
+            },
+            SessionMessage {
+                role: "assistant".to_string(),
+                content: "second".to_string(),
+                timestamp: Some(Utc.with_ymd_and_hms(2026, 1, 1, 10, 40, 0).unwrap()),
+            },
+            SessionMessage {
+                role: "user".to_string(),
+                content: "third".to_string(),
+                timestamp: Some(Utc.with_ymd_and_hms(2026, 1, 1, 10, 50, 0).unwrap()),
+            },
+        ];
+
+        let messages = build_messages_from_history(&history);
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(
+            messages[1].content,
+            vec![ContentBlock::Text {
+                text: "[40 minute(s) of inactivity has passed since the last message]".to_string()
+            }]
+        );
+        assert_eq!(messages[2].role, "assistant");
+        assert_eq!(messages[3].role, "user");
     }
 }
