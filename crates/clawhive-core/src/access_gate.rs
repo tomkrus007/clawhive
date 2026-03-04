@@ -110,10 +110,12 @@ impl AccessGate {
 
     /// Check whether `path` can be accessed at the requested `need` level.
     pub async fn check(&self, path: &Path, need: AccessLevel) -> AccessResult {
+        tracing::debug!(path = %path.display(), need = %need, "access_gate check");
         // 1. HardBaseline — always first
         match need {
             AccessLevel::Ro => {
                 if HardBaseline::path_read_denied(path) {
+                    tracing::warn!(path = %path.display(), "read denied by hard baseline");
                     return AccessResult::Denied(format!(
                         "Read access denied: sensitive file (hard baseline): {}",
                         path.display()
@@ -122,6 +124,7 @@ impl AccessGate {
             }
             AccessLevel::Rw => {
                 if HardBaseline::path_write_denied(path) {
+                    tracing::warn!(path = %path.display(), "write denied by hard baseline");
                     return AccessResult::Denied(format!(
                         "Write access denied: sensitive path (hard baseline): {}",
                         path.display()
@@ -129,6 +132,7 @@ impl AccessGate {
                 }
                 // Also check read-deny for writes (if you can't read it, you can't write it)
                 if HardBaseline::path_read_denied(path) {
+                    tracing::warn!(path = %path.display(), "read denied by hard baseline (for write)");
                     return AccessResult::Denied(format!(
                         "Access denied: sensitive file (hard baseline): {}",
                         path.display()
@@ -176,6 +180,7 @@ impl AccessGate {
         // 4. Not found — need grant
         // Walk up to the nearest real directory for a sensible suggestion
         let suggest_dir = nearest_dir(path);
+        tracing::debug!(path = %path.display(), need = %need, suggest_dir = %suggest_dir, "path not in allowlist, need grant");
         AccessResult::NeedGrant {
             dir: suggest_dir,
             need,
@@ -187,6 +192,7 @@ impl AccessGate {
         // Canonicalize so the stored path matches what resolve_path produces
         let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let dir_str = canonical.to_string_lossy().to_string();
+        tracing::info!(dir = %dir_str, level = %level, "granting directory access");
 
         // Block granting to hard-baseline paths (check both original and canonical)
         if HardBaseline::path_write_denied(dir)
@@ -194,6 +200,7 @@ impl AccessGate {
             || HardBaseline::path_write_denied(&canonical)
             || HardBaseline::path_read_denied(&canonical)
         {
+            tracing::warn!(dir = %dir.display(), "grant blocked: sensitive path");
             return Err(anyhow!(
                 "Cannot grant access to sensitive path: {}",
                 dir.display()
@@ -223,6 +230,7 @@ impl AccessGate {
     pub async fn revoke(&self, dir: &Path) -> Result<()> {
         let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let dir_str = canonical.to_string_lossy().to_string();
+        tracing::info!(dir = %dir_str, "revoking directory access");
         let mut policy = self.policy.write().await;
         let before = policy.allowed.len();
         policy.allowed.retain(|e| e.path != dir_str);
