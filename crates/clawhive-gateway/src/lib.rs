@@ -8,6 +8,8 @@ use clawhive_schema::*;
 use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
+pub mod webhook;
+
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
     pub requests_per_minute: u32,
@@ -470,7 +472,23 @@ async fn deliver_if_needed(bus: &Arc<EventBus>, delivery: &ScheduledDeliveryInfo
             }
         }
         ScheduledDeliveryMode::Webhook => {
-            tracing::warn!("Webhook delivery not yet implemented");
+            let Some(url) = &delivery.webhook_url else {
+                tracing::warn!("Webhook delivery mode set but no webhook_url provided");
+                return;
+            };
+            let now = chrono::Utc::now();
+            let payload = webhook::WebhookPayload {
+                schedule_id: String::new(),
+                status: "ok".into(),
+                response: Some(text.to_string()),
+                error: None,
+                started_at: now,
+                ended_at: now,
+                duration_ms: 0,
+            };
+            if let Err(e) = webhook::deliver_webhook(url, &payload).await {
+                tracing::warn!(url = %url, error = %e, "Webhook delivery failed");
+            }
         }
     }
 }

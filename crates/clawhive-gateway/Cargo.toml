@@ -17,6 +17,8 @@ clawhive-memory = { path = "../clawhive-memory" }
 clawhive-bus = { path = "../clawhive-bus" }
 clawhive-scheduler = { path = "../clawhive-scheduler" }
 tokio.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 clawhive-runtime = { path = "../clawhive-runtime" }
