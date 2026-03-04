@@ -86,6 +86,7 @@ fn error_backoff_and_state_transition_work() {
             agent_id: "clawhive-main".to_string(),
             session_mode: SessionMode::Isolated,
             task: "run".to_string(),
+            payload: None,
             timeout_seconds: 300,
             delete_after_run: false,
             delivery: DeliveryConfig::default(),

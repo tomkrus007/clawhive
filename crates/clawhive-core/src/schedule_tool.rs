@@ -108,6 +108,24 @@ impl ScheduleJobInput {
             }
         }
 
+        let payload = match resolved {
+            TaskPayload::AgentTurn {
+                model,
+                thinking,
+                timeout_seconds,
+                light_context,
+                ..
+            } => TaskPayload::AgentTurn {
+                message: task.clone(),
+                model,
+                thinking,
+                timeout_seconds,
+                light_context,
+            },
+            TaskPayload::SystemEvent { .. } => TaskPayload::SystemEvent { text: task.clone() },
+            TaskPayload::DirectDeliver { .. } => TaskPayload::DirectDeliver { text: task.clone() },
+        };
+
         let delivery = self.delivery.unwrap_or(DeliveryInput {
             mode: None,
             channel: None,
@@ -149,6 +167,7 @@ impl ScheduleJobInput {
                 .unwrap_or_else(|| default_agent_id.to_string()),
             session_mode: self.session_mode.unwrap_or(SessionMode::Isolated),
             task,
+            payload: Some(payload),
             timeout_seconds: self.timeout_seconds.unwrap_or(300),
             delete_after_run,
             delivery: DeliveryConfig {
@@ -576,6 +595,7 @@ mod tests {
                 agent_id: "clawhive-main".to_string(),
                 session_mode: clawhive_scheduler::SessionMode::Isolated,
                 task: "generate report".to_string(),
+                payload: None,
                 timeout_seconds: 300,
                 delete_after_run: false,
                 delivery: clawhive_scheduler::DeliveryConfig::default(),

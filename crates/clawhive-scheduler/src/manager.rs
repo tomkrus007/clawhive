@@ -42,6 +42,40 @@ pub struct CompletedResult {
     pub duration_ms: u64,
 }
 
+fn to_scheduled_payload(config: &ScheduleConfig) -> ScheduledTaskPayload {
+    if let Some(ref payload) = config.payload {
+        match payload {
+            crate::TaskPayload::SystemEvent { text } => {
+                ScheduledTaskPayload::SystemEvent { text: text.clone() }
+            }
+            crate::TaskPayload::AgentTurn {
+                message,
+                model,
+                thinking,
+                timeout_seconds,
+                light_context,
+            } => ScheduledTaskPayload::AgentTurn {
+                message: message.clone(),
+                model: model.clone(),
+                thinking: thinking.clone(),
+                timeout_seconds: *timeout_seconds,
+                light_context: *light_context,
+            },
+            crate::TaskPayload::DirectDeliver { text } => {
+                ScheduledTaskPayload::DirectDeliver { text: text.clone() }
+            }
+        }
+    } else {
+        ScheduledTaskPayload::AgentTurn {
+            message: config.task.clone(),
+            model: None,
+            thinking: None,
+            timeout_seconds: config.timeout_seconds,
+            light_context: false,
+        }
+    }
+}
+
 pub fn apply_job_result(entry: &mut ScheduleEntry, result: &CompletedResult) -> bool {
     let state = &mut entry.state;
 
@@ -107,7 +141,8 @@ impl ScheduleManager {
         let mut entries = HashMap::new();
         let now_ms = Utc::now().timestamp_millis();
 
-        for config in configs {
+        for mut config in configs {
+            config.migrate_legacy();
             let mut state = persisted_states
                 .get(&config.schedule_id)
                 .cloned()
@@ -256,13 +291,7 @@ impl ScheduleManager {
         let msg = BusMessage::ScheduledTaskTriggered {
             schedule_id: entry.config.schedule_id.clone(),
             agent_id: entry.config.agent_id.clone(),
-            payload: ScheduledTaskPayload::AgentTurn {
-                message: entry.config.task.clone(),
-                model: None,
-                thinking: None,
-                timeout_seconds: entry.config.timeout_seconds,
-                light_context: false,
-            },
+            payload: to_scheduled_payload(&entry.config),
             delivery: ScheduledDeliveryInfo {
                 mode: match entry.config.delivery.mode {
                     DeliveryMode::None => ScheduledDeliveryMode::None,
@@ -351,13 +380,7 @@ impl ScheduleManager {
                     .publish(BusMessage::ScheduledTaskTriggered {
                         schedule_id: entry.config.schedule_id.clone(),
                         agent_id: entry.config.agent_id.clone(),
-                        payload: ScheduledTaskPayload::AgentTurn {
-                            message: entry.config.task.clone(),
-                            model: None,
-                            thinking: None,
-                            timeout_seconds: entry.config.timeout_seconds,
-                            light_context: false,
-                        },
+                        payload: to_scheduled_payload(&entry.config),
                         delivery: ScheduledDeliveryInfo {
                             mode: match entry.config.delivery.mode {
                                 DeliveryMode::None => ScheduledDeliveryMode::None,
@@ -554,6 +577,7 @@ mod tests {
                 agent_id: "clawhive-main".to_string(),
                 session_mode: SessionMode::Isolated,
                 task: "test task".to_string(),
+                payload: None,
                 timeout_seconds: 300,
                 delete_after_run,
                 delivery: DeliveryConfig::default(),
@@ -684,6 +708,7 @@ mod tests {
             agent_id: "clawhive-main".to_string(),
             session_mode: SessionMode::Isolated,
             task: "stuck task".to_string(),
+            payload: None,
             timeout_seconds: 300,
             delete_after_run: false,
             delivery: DeliveryConfig::default(),
