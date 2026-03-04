@@ -119,6 +119,16 @@ impl ScheduleManager {
             entries.insert(config.schedule_id.clone(), ScheduleEntry { config, state });
         }
 
+        for entry in entries.values_mut() {
+            if entry.state.running_at_ms.is_some() {
+                tracing::warn!(
+                    schedule_id = %entry.config.schedule_id,
+                    "Clearing stale running marker on startup"
+                );
+                entry.state.running_at_ms = None;
+            }
+        }
+
         Ok(Self {
             entries: Arc::new(RwLock::new(entries)),
             bus,
@@ -303,6 +313,18 @@ impl ScheduleManager {
         let mut entries = self.entries.write().await;
 
         for entry in entries.values_mut() {
+            const STUCK_RUN_MS: i64 = 2 * 60 * 60 * 1000;
+            if let Some(running_at) = entry.state.running_at_ms {
+                if now_ms - running_at > STUCK_RUN_MS {
+                    tracing::warn!(
+                        schedule_id = %entry.config.schedule_id,
+                        running_at_ms = running_at,
+                        "Clearing stuck running marker"
+                    );
+                    entry.state.running_at_ms = None;
+                }
+            }
+
             if !entry.config.enabled || entry.state.running_at_ms.is_some() {
                 continue;
             }
@@ -628,5 +650,61 @@ mod tests {
 
         assert_eq!(entry.state.consecutive_errors, 3);
         assert!(!entry.config.enabled);
+    }
+
+    #[tokio::test]
+    async fn stuck_running_marker_is_cleared_on_startup() {
+        let (config_dir, data_dir) = test_dirs();
+        let bus = Arc::new(clawhive_bus::EventBus::new(16));
+
+        let config = ScheduleConfig {
+            schedule_id: "stuck-job".to_string(),
+            enabled: true,
+            name: "Stuck Job".to_string(),
+            description: None,
+            schedule: ScheduleType::Every {
+                interval_ms: 60_000,
+                anchor_ms: None,
+            },
+            agent_id: "clawhive-main".to_string(),
+            session_mode: SessionMode::Isolated,
+            task: "stuck task".to_string(),
+            timeout_seconds: 300,
+            delete_after_run: false,
+            delivery: DeliveryConfig::default(),
+        };
+        std::fs::write(
+            config_dir.join("stuck-job.yaml"),
+            serde_yaml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        let mut states = HashMap::new();
+        states.insert(
+            "stuck-job".to_string(),
+            ScheduleState {
+                schedule_id: "stuck-job".to_string(),
+                next_run_at_ms: Some(Utc::now().timestamp_millis() + 60_000),
+                running_at_ms: Some(Utc::now().timestamp_millis() - 10_000),
+                last_run_at_ms: None,
+                last_run_status: None,
+                last_error: None,
+                last_duration_ms: None,
+                consecutive_errors: 0,
+                last_delivery_status: None,
+                last_delivery_error: None,
+            },
+        );
+        let state_json = serde_json::to_string_pretty(&states).unwrap();
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("state.json"), state_json).unwrap();
+
+        let manager = ScheduleManager::new(&config_dir, &data_dir, bus).unwrap();
+        let list = manager.list().await;
+        assert_eq!(list.len(), 1);
+        assert!(
+            list[0].state.running_at_ms.is_none(),
+            "running_at_ms should be cleared on startup"
+        );
     }
 }
