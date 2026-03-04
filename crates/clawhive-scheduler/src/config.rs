@@ -130,18 +130,23 @@ pub enum TaskPayload {
 pub fn resolve_payload(
     task: Option<String>,
     payload: Option<TaskPayload>,
+    session_mode: SessionMode,
 ) -> Result<TaskPayload, anyhow::Error> {
     if let Some(p) = payload {
         return Ok(p);
     }
     match task {
-        Some(t) => Ok(TaskPayload::AgentTurn {
-            message: t,
-            model: None,
-            thinking: None,
-            timeout_seconds: 300,
-            light_context: false,
-        }),
+        Some(t) if !t.trim().is_empty() => match session_mode {
+            SessionMode::Main => Ok(TaskPayload::SystemEvent { text: t }),
+            SessionMode::Isolated => Ok(TaskPayload::AgentTurn {
+                message: t,
+                model: None,
+                thinking: None,
+                timeout_seconds: 300,
+                light_context: false,
+            }),
+        },
+        Some(_) => Err(anyhow::anyhow!("task cannot be empty")),
         None => Err(anyhow::anyhow!("either task or payload must be provided")),
     }
 }
@@ -271,13 +276,14 @@ mod tests {
     #[test]
     fn resolve_payload_prefers_explicit() {
         let payload = TaskPayload::DirectDeliver { text: "hi".into() };
-        let result = resolve_payload(Some("old task".into()), Some(payload)).unwrap();
+        let result =
+            resolve_payload(Some("old task".into()), Some(payload), SessionMode::Main).unwrap();
         assert!(matches!(result, TaskPayload::DirectDeliver { .. }));
     }
 
     #[test]
     fn resolve_payload_falls_back_to_task() {
-        let result = resolve_payload(Some("old task".into()), None).unwrap();
+        let result = resolve_payload(Some("old task".into()), None, SessionMode::Isolated).unwrap();
         match result {
             TaskPayload::AgentTurn {
                 message,
@@ -293,8 +299,21 @@ mod tests {
 
     #[test]
     fn resolve_payload_errors_when_both_none() {
-        let result = resolve_payload(None, None);
+        let result = resolve_payload(None, None, SessionMode::Isolated);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_payload_rejects_empty_task() {
+        let result = resolve_payload(Some("   ".into()), None, SessionMode::Isolated);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn resolve_payload_main_mode_becomes_system_event() {
+        let result = resolve_payload(Some("legacy main".into()), None, SessionMode::Main).unwrap();
+        assert!(matches!(result, TaskPayload::SystemEvent { text } if text == "legacy main"));
     }
 
     #[test]

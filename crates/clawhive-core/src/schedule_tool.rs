@@ -85,7 +85,8 @@ impl ScheduleJobInput {
         default_agent_id: &str,
         ctx: &ToolContext,
     ) -> Result<ScheduleConfig, anyhow::Error> {
-        let resolved = resolve_payload(self.task.clone(), self.payload)?;
+        let session_mode = self.session_mode.clone().unwrap_or(SessionMode::Isolated);
+        let resolved = resolve_payload(self.task.clone(), self.payload, session_mode.clone())?;
 
         let mut task = match &resolved {
             TaskPayload::AgentTurn { message, .. } => message.clone(),
@@ -165,7 +166,7 @@ impl ScheduleJobInput {
                 .agent_id
                 .filter(|id| !id.trim().is_empty())
                 .unwrap_or_else(|| default_agent_id.to_string()),
-            session_mode: self.session_mode.unwrap_or(SessionMode::Isolated),
+            session_mode,
             task,
             payload: Some(payload),
             timeout_seconds: self.timeout_seconds.unwrap_or(300),
@@ -332,6 +333,29 @@ impl ToolExecutor for ScheduleTool {
                             "context_messages": {
                                 "type": "number",
                                 "description": "Number of recent messages to include as context (0-10)"
+                            },
+                            "delivery": {
+                                "type": "object",
+                                "description": "Delivery behavior for schedule completion notifications",
+                                "properties": {
+                                    "mode": {
+                                        "type": "string",
+                                        "enum": ["none", "announce", "webhook"],
+                                        "description": "Delivery mode"
+                                    },
+                                    "channel": {
+                                        "type": "string",
+                                        "description": "Announce channel override (defaults to source channel)"
+                                    },
+                                    "connector_id": {
+                                        "type": "string",
+                                        "description": "Announce connector override (defaults to source connector)"
+                                    },
+                                    "webhook_url": {
+                                        "type": "string",
+                                        "description": "Webhook URL when mode=webhook"
+                                    }
+                                }
                             }
                         },
                         "required": ["name", "schedule"]
