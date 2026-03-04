@@ -530,6 +530,8 @@ mod tests {
                 last_error: None,
                 last_duration_ms: None,
                 consecutive_errors: 0,
+                last_delivery_status: None,
+                last_delivery_error: None,
             },
         }
     }

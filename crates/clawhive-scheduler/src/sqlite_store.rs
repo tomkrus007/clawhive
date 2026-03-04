@@ -57,6 +57,8 @@ impl SqliteStore {
                 last_error: row.get(5)?,
                 last_duration_ms: row.get(6)?,
                 consecutive_errors: row.get::<_, i64>(7)? as u32,
+                last_delivery_status: None,
+                last_delivery_error: None,
             })
         })?;
 
