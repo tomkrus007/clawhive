@@ -69,6 +69,55 @@ pub enum SessionMode {
     Main,
 }
 
+fn default_payload_timeout() -> u64 {
+    300
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum TaskPayload {
+    /// Inject into the source channel's session, reusing the original conversation context.
+    /// Agent processes it on next heartbeat or wake.
+    #[serde(rename = "system_event")]
+    SystemEvent { text: String },
+    /// Create an isolated session and run a full agent turn.
+    #[serde(rename = "agent_turn")]
+    AgentTurn {
+        message: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        thinking: Option<String>,
+        #[serde(default = "default_payload_timeout")]
+        timeout_seconds: u64,
+        #[serde(default)]
+        light_context: bool,
+    },
+    /// Deliver text directly without going through the agent. For simple reminders.
+    #[serde(rename = "direct_deliver")]
+    DirectDeliver { text: String },
+}
+
+/// Resolve payload from either explicit payload or legacy task field.
+pub fn resolve_payload(
+    task: Option<String>,
+    payload: Option<TaskPayload>,
+) -> Result<TaskPayload, anyhow::Error> {
+    if let Some(p) = payload {
+        return Ok(p);
+    }
+    match task {
+        Some(t) => Ok(TaskPayload::AgentTurn {
+            message: t,
+            model: None,
+            thinking: None,
+            timeout_seconds: 300,
+            light_context: false,
+        }),
+        None => Err(anyhow::anyhow!("either task or payload must be provided")),
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct DeliveryConfig {
     #[serde(default)]
@@ -86,6 +135,9 @@ pub struct DeliveryConfig {
     /// Source conversation scope (e.g., "guild:123:channel:456") for announce delivery
     #[serde(default)]
     pub source_conversation_scope: Option<String>,
+    /// Source user scope for preserving session key identity in SystemEvent execution
+    #[serde(default)]
+    pub source_user_scope: Option<String>,
 }
 
 impl Default for DeliveryConfig {
@@ -97,6 +149,7 @@ impl Default for DeliveryConfig {
             source_channel_type: None,
             source_connector_id: None,
             source_conversation_scope: None,
+            source_user_scope: None,
         }
     }
 }
@@ -120,4 +173,87 @@ fn default_timeout() -> u64 {
 
 fn default_tz() -> String {
     "UTC".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_payload_serde_system_event() {
+        let payload = TaskPayload::SystemEvent {
+            text: "hello".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("system_event"));
+        let back: TaskPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, TaskPayload::SystemEvent { text } if text == "hello"));
+    }
+
+    #[test]
+    fn task_payload_serde_agent_turn() {
+        let payload = TaskPayload::AgentTurn {
+            message: "do task".into(),
+            model: Some("anthropic/claude-opus-4".into()),
+            thinking: None,
+            timeout_seconds: 120,
+            light_context: false,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("agent_turn"));
+        let back: TaskPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, TaskPayload::AgentTurn { message, .. } if message == "do task"));
+    }
+
+    #[test]
+    fn task_payload_serde_direct_deliver() {
+        let payload = TaskPayload::DirectDeliver {
+            text: "reminder".into(),
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("direct_deliver"));
+        let back: TaskPayload = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, TaskPayload::DirectDeliver { text } if text == "reminder"));
+    }
+
+    #[test]
+    fn resolve_payload_prefers_explicit() {
+        let payload = TaskPayload::DirectDeliver { text: "hi".into() };
+        let result = resolve_payload(Some("old task".into()), Some(payload)).unwrap();
+        assert!(matches!(result, TaskPayload::DirectDeliver { .. }));
+    }
+
+    #[test]
+    fn resolve_payload_falls_back_to_task() {
+        let result = resolve_payload(Some("old task".into()), None).unwrap();
+        match result {
+            TaskPayload::AgentTurn {
+                message,
+                timeout_seconds,
+                ..
+            } => {
+                assert_eq!(message, "old task");
+                assert_eq!(timeout_seconds, 300);
+            }
+            _ => panic!("expected AgentTurn"),
+        }
+    }
+
+    #[test]
+    fn resolve_payload_errors_when_both_none() {
+        let result = resolve_payload(None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn delivery_config_serde_with_user_scope() {
+        let config = DeliveryConfig {
+            source_user_scope: Some("user:456".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("user:456"));
+        let back: DeliveryConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source_user_scope.as_deref(), Some("user:456"));
+    }
 }

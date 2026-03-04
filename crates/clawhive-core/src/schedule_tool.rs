@@ -141,6 +141,7 @@ impl ScheduleJobInput {
                 source_channel_type: ctx.source_channel_type().map(String::from),
                 source_connector_id: ctx.source_connector_id().map(String::from),
                 source_conversation_scope: ctx.source_conversation_scope().map(String::from),
+                source_user_scope: ctx.source_user_scope().map(String::from),
             },
         }
     }
