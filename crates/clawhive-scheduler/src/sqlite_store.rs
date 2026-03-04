@@ -41,7 +41,8 @@ impl SqliteStore {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             r#"SELECT schedule_id, next_run_at_ms, running_at_ms, last_run_at_ms,
-                      last_run_status, last_error, last_duration_ms, consecutive_errors
+                      last_run_status, last_error, last_duration_ms, consecutive_errors,
+                      last_delivery_status, last_delivery_error
                FROM schedule_states"#,
         )?;
 
@@ -57,8 +58,10 @@ impl SqliteStore {
                 last_error: row.get(5)?,
                 last_duration_ms: row.get(6)?,
                 consecutive_errors: row.get::<_, i64>(7)? as u32,
-                last_delivery_status: None,
-                last_delivery_error: None,
+                last_delivery_status: row
+                    .get::<_, Option<String>>(8)?
+                    .map(|s| parse_delivery_status(&s)),
+                last_delivery_error: row.get(9)?,
             })
         })?;
 
@@ -75,8 +78,9 @@ impl SqliteStore {
         conn.execute(
             r#"INSERT OR REPLACE INTO schedule_states
                (schedule_id, next_run_at_ms, running_at_ms, last_run_at_ms,
-                last_run_status, last_error, last_duration_ms, consecutive_errors)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+                last_run_status, last_error, last_duration_ms, consecutive_errors,
+                last_delivery_status, last_delivery_error)
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"#,
             params![
                 state.schedule_id,
                 state.next_run_at_ms,
@@ -86,6 +90,11 @@ impl SqliteStore {
                 state.last_error,
                 state.last_duration_ms,
                 state.consecutive_errors as i64,
+                state
+                    .last_delivery_status
+                    .as_ref()
+                    .map(format_delivery_status),
+                state.last_delivery_error,
             ],
         )?;
         Ok(())
@@ -365,6 +374,13 @@ fn run_migrations(conn: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_wait_tasks_status ON wait_tasks(status);
             "#,
         ),
+        (
+            3,
+            r#"
+            ALTER TABLE schedule_states ADD COLUMN last_delivery_status TEXT;
+            ALTER TABLE schedule_states ADD COLUMN last_delivery_error TEXT;
+            "#,
+        ),
     ];
 
     for (version, sql) in migrations {
@@ -424,9 +440,26 @@ fn parse_wait_task_status(s: &str) -> WaitTaskStatus {
     }
 }
 
+fn format_delivery_status(status: &crate::DeliveryStatus) -> &'static str {
+    match status {
+        crate::DeliveryStatus::Delivered => "delivered",
+        crate::DeliveryStatus::NotDelivered => "not_delivered",
+        crate::DeliveryStatus::NotRequested => "not_requested",
+    }
+}
+
+fn parse_delivery_status(s: &str) -> crate::DeliveryStatus {
+    match s {
+        "delivered" => crate::DeliveryStatus::Delivered,
+        "not_delivered" => crate::DeliveryStatus::NotDelivered,
+        _ => crate::DeliveryStatus::NotRequested,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DeliveryStatus;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -451,5 +484,32 @@ mod tests {
         // Delete
         store.delete_wait_task("test-1").await.unwrap();
         assert!(store.get_wait_task("test-1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_state_with_delivery_fields() {
+        let tmp = TempDir::new().unwrap();
+        let store = SqliteStore::open(&tmp.path().join("test.db")).unwrap();
+
+        let state = ScheduleState {
+            schedule_id: "test-delivery".into(),
+            next_run_at_ms: None,
+            running_at_ms: None,
+            last_run_at_ms: None,
+            last_run_status: None,
+            last_error: None,
+            last_duration_ms: None,
+            consecutive_errors: 0,
+            last_delivery_status: Some(DeliveryStatus::Delivered),
+            last_delivery_error: None,
+        };
+
+        store.save_schedule_state(&state).await.unwrap();
+        let loaded = store.load_schedule_states().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].last_delivery_status,
+            Some(DeliveryStatus::Delivered)
+        );
     }
 }
