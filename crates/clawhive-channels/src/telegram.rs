@@ -155,6 +155,13 @@ impl TelegramBot {
                     .unwrap_or("")
                     .to_string();
 
+                let quoted_text = msg
+                    .reply_to_message()
+                    .and_then(|quoted| quoted.text().or_else(|| quoted.caption()))
+                    .map(|s| s.to_string());
+
+                text = compose_inbound_text(&text, quoted_text.as_deref());
+
                 // Normalize Telegram-style underscore commands to space format
                 text = text
                     .replacen("/skill_analyze", "/skill analyze", 1)
@@ -995,6 +1002,23 @@ fn parse_chat_id(conversation_scope: &str) -> Option<i64> {
     }
 }
 
+fn compose_inbound_text(user_text: &str, quoted_text: Option<&str>) -> String {
+    let trimmed_user = user_text.trim();
+    if trimmed_user.starts_with('/') {
+        return user_text.to_string();
+    }
+
+    let quoted = quoted_text.unwrap_or("").trim();
+    if quoted.is_empty() {
+        return user_text.to_string();
+    }
+
+    format!(
+        "[Quoted Message]\n{}\n\n[Current Message]\n{}",
+        quoted, user_text
+    )
+}
+
 fn utf16_range_to_byte_range(text: &str, offset: usize, length: usize) -> Option<(usize, usize)> {
     let start = utf16_offset_to_byte_idx(text, offset)?;
     let end = utf16_offset_to_byte_idx(text, offset.checked_add(length)?)?;
@@ -1105,6 +1129,27 @@ mod tests {
         let adapter = TelegramAdapter::new("tg");
         let msg = adapter.to_inbound(-100123, 456, "group msg", Some(1));
         assert_eq!(msg.conversation_scope, "chat:-100123");
+    }
+
+    #[test]
+    fn compose_inbound_text_includes_quoted_context() {
+        let text = compose_inbound_text("没下文了吗？", Some("我已经把两个修复都部署好了"));
+        assert!(text.contains("[Quoted Message]"));
+        assert!(text.contains("我已经把两个修复都部署好了"));
+        assert!(text.contains("[Current Message]"));
+        assert!(text.contains("没下文了吗？"));
+    }
+
+    #[test]
+    fn compose_inbound_text_keeps_command_plain() {
+        let text = compose_inbound_text("/status", Some("之前那条消息"));
+        assert_eq!(text, "/status");
+    }
+
+    #[test]
+    fn compose_inbound_text_without_quote_keeps_original() {
+        let text = compose_inbound_text("你好", None);
+        assert_eq!(text, "你好");
     }
 
     #[test]
