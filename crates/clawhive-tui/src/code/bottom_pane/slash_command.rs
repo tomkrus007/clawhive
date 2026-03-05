@@ -3,13 +3,11 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-#[allow(dead_code)]
 pub(crate) struct SlashCommand {
     pub name: &'static str,
     pub description: &'static str,
 }
 
-#[allow(dead_code)]
 pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/compact",
@@ -45,7 +43,6 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
-#[allow(dead_code)]
 pub(crate) fn filter_commands(query: &str) -> Vec<&'static SlashCommand> {
     if query.is_empty() {
         return SLASH_COMMANDS.iter().collect();
@@ -58,7 +55,6 @@ pub(crate) fn filter_commands(query: &str) -> Vec<&'static SlashCommand> {
         .collect()
 }
 
-#[allow(dead_code)]
 pub(crate) fn render_slash_command_picker(
     area: Rect,
     buf: &mut Buffer,
@@ -104,12 +100,10 @@ pub(crate) fn render_slash_command_picker(
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn slash_picker_height(query: &str) -> u16 {
     filter_commands(query).len().min(8) as u16 + 2
 }
 
-#[allow(dead_code)]
 fn draw_border(area: Rect, buf: &mut Buffer, style: Style) {
     if area.width < 2 {
         return;

@@ -819,4 +819,129 @@ mod tests {
             _ => panic!("expected assistant text"),
         }
     }
+
+    #[test]
+    fn approval_flow_transitions_bottom_pane() {
+        let mut app = CodeApp::new("agent".into(), "model".into());
+        assert!(matches!(app.bottom_pane, super::BottomPaneState::Input));
+
+        app.handle_bus_message(
+            BusMessage::NeedHumanApproval {
+                trace_id: uuid::Uuid::new_v4(),
+                command: "rm -rf /".to_string(),
+                agent_id: "agent".to_string(),
+                reason: "dangerous".to_string(),
+                network_target: None,
+                source_channel_type: None,
+                source_connector_id: None,
+                source_conversation_scope: None,
+            },
+            "connector-1",
+        );
+
+        assert!(matches!(
+            app.bottom_pane,
+            super::BottomPaneState::Approval(_)
+        ));
+    }
+
+    #[test]
+    fn stream_delta_appends_to_existing_streaming_cell() {
+        let mut app = CodeApp::new("agent".into(), "model".into());
+
+        let trace = uuid::Uuid::new_v4();
+        app.handle_bus_message(
+            BusMessage::StreamDelta {
+                trace_id: trace,
+                delta: "hello ".into(),
+                is_final: false,
+            },
+            "c",
+        );
+        app.handle_bus_message(
+            BusMessage::StreamDelta {
+                trace_id: trace,
+                delta: "world".into(),
+                is_final: false,
+            },
+            "c",
+        );
+
+        match app.history.last() {
+            Some(HistoryCell::AssistantText { text, .. }) => assert_eq!(text, "hello world"),
+            _ => panic!("expected assistant text"),
+        }
+    }
+
+    #[test]
+    fn final_stream_delta_marks_not_running() {
+        let mut app = CodeApp::new("agent".into(), "model".into());
+        app.is_running = true;
+
+        app.handle_bus_message(
+            BusMessage::StreamDelta {
+                trace_id: uuid::Uuid::new_v4(),
+                delta: "done".into(),
+                is_final: false,
+            },
+            "c",
+        );
+        app.handle_bus_message(
+            BusMessage::StreamDelta {
+                trace_id: uuid::Uuid::new_v4(),
+                delta: String::new(),
+                is_final: true,
+            },
+            "c",
+        );
+
+        assert!(!app.is_running);
+    }
+
+    #[test]
+    fn task_failed_adds_error_cell() {
+        let mut app = CodeApp::new("agent".into(), "model".into());
+        app.is_running = true;
+
+        app.handle_bus_message(
+            BusMessage::TaskFailed {
+                trace_id: uuid::Uuid::new_v4(),
+                error: "boom".into(),
+            },
+            "c",
+        );
+
+        assert!(!app.is_running);
+        assert!(matches!(
+            app.history.last(),
+            Some(HistoryCell::Error { .. })
+        ));
+    }
+
+    #[test]
+    fn multiple_approvals_queue_correctly() {
+        let mut app = CodeApp::new("agent".into(), "model".into());
+
+        for i in 0..3 {
+            app.handle_bus_message(
+                BusMessage::NeedHumanApproval {
+                    trace_id: uuid::Uuid::new_v4(),
+                    command: format!("cmd-{i}"),
+                    agent_id: "agent".to_string(),
+                    reason: "test".to_string(),
+                    network_target: None,
+                    source_channel_type: None,
+                    source_connector_id: None,
+                    source_conversation_scope: None,
+                },
+                "c",
+            );
+        }
+
+        assert!(matches!(
+            app.bottom_pane,
+            super::BottomPaneState::Approval(_)
+        ));
+        assert_eq!(app.approval_queue.len(), 2);
+    }
 }

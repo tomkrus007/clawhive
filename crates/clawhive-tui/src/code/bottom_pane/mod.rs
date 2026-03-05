@@ -11,7 +11,6 @@ pub mod shortcuts;
 pub mod slash_command;
 
 /// Active mode for the bottom interaction pane.
-#[allow(dead_code)]
 pub(crate) enum BottomPaneState {
     Input,
     Approval(ApprovalRequest),
@@ -21,17 +20,16 @@ pub(crate) enum BottomPaneState {
 }
 
 /// Pending command approval state.
-#[allow(dead_code)]
 pub(crate) struct ApprovalRequest {
     pub trace_id: Uuid,
     pub command: String,
+    #[allow(dead_code)]
     pub agent_id: String,
     pub diff: Option<Vec<DiffHunk>>,
     pub selected_option: usize,
 }
 
 /// Shared list filtering state for pickers.
-#[allow(dead_code)]
 pub(crate) struct FilterState {
     pub query: String,
     pub selected: usize,
