@@ -39,6 +39,10 @@ struct ScheduleInput {
     schedule_id: Option<String>,
     #[serde(default)]
     patch: Option<serde_json::Value>,
+    #[serde(default)]
+    include_history: Option<bool>,
+    #[serde(default)]
+    history_limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,6 +269,10 @@ fn tool_ok(message: impl Into<String>) -> ToolOutput {
     }
 }
 
+fn format_timestamp_ms(ms: Option<i64>) -> Option<String> {
+    ms.and_then(|v| chrono::DateTime::<Utc>::from_timestamp_millis(v).map(|dt| dt.to_rfc3339()))
+}
+
 #[async_trait]
 impl ToolExecutor for ScheduleTool {
     fn definition(&self) -> ToolDef {
@@ -277,7 +285,7 @@ impl ToolExecutor for ScheduleTool {
                 "properties": {
                     "action": { 
                         "type": "string", 
-                        "enum": ["list", "add", "update", "remove", "run"],
+                        "enum": ["list", "get", "add", "update", "remove", "run"],
                         "description": "Action to perform"
                     },
                     "job": { 
@@ -388,13 +396,52 @@ impl ToolExecutor for ScheduleTool {
                             "schedule_id": entry.config.schedule_id,
                             "name": entry.config.name,
                             "enabled": entry.config.enabled,
-                            "next_run": entry.state.next_run_at_ms,
+                            "next_run": format_timestamp_ms(entry.state.next_run_at_ms),
+                            "next_run_ms": entry.state.next_run_at_ms,
+                            "last_run_at": format_timestamp_ms(entry.state.last_run_at_ms),
                             "last_status": entry.state.last_run_status,
                             "consecutive_errors": entry.state.consecutive_errors,
                         })
                     })
                     .collect::<Vec<_>>();
                 Ok(tool_ok(serde_json::to_string_pretty(&summary)?))
+            }
+            "get" => {
+                let Some(schedule_id) = parsed.schedule_id else {
+                    return Ok(tool_error("schedule_id is required for get action"));
+                };
+
+                let entries = self.manager.list().await;
+                let Some(entry) = entries
+                    .into_iter()
+                    .find(|e| e.config.schedule_id == schedule_id)
+                else {
+                    return Ok(tool_error(format!("schedule not found: {schedule_id}")));
+                };
+
+                let include_history = parsed.include_history.unwrap_or(true);
+                let history_limit = parsed.history_limit.unwrap_or(5);
+                let history = if include_history {
+                    self.manager
+                        .recent_history(&schedule_id, history_limit)
+                        .await?
+                } else {
+                    Vec::new()
+                };
+
+                let detail = serde_json::json!({
+                    "config": entry.config,
+                    "state": entry.state,
+                    "state_view": {
+                        "next_run": format_timestamp_ms(entry.state.next_run_at_ms),
+                        "next_run_ms": entry.state.next_run_at_ms,
+                        "last_run_at": format_timestamp_ms(entry.state.last_run_at_ms),
+                        "last_status": entry.state.last_run_status,
+                        "consecutive_errors": entry.state.consecutive_errors,
+                    },
+                    "recent_history": history,
+                });
+                Ok(tool_ok(serde_json::to_string_pretty(&detail)?))
             }
             "add" => {
                 let Some(job) = parsed.job else {
@@ -515,6 +562,60 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].config.schedule_id, "milk-reminder");
         assert!(entries[0].config.task.contains("Recent context"));
+    }
+
+    #[tokio::test]
+    async fn get_action_returns_payload_and_delivery_details() {
+        let (manager, _bus, _tmp) = setup();
+        let tool = ScheduleTool::new(manager.clone());
+        let ctx = ToolContext::builtin();
+
+        let add_result = tool
+            .execute(
+                serde_json::json!({
+                    "action": "add",
+                    "job": {
+                        "name": "Payload detail",
+                        "schedule": { "kind": "every", "interval_ms": 60000 },
+                        "payload": {
+                            "kind": "agent_turn",
+                            "message": "check budget status",
+                            "timeout_seconds": 600
+                        },
+                        "delivery": {
+                            "mode": "announce",
+                            "channel": "guild:1:channel:2",
+                            "connector_id": "dc_main"
+                        }
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!add_result.is_error);
+
+        let schedule_id = manager.list().await[0].config.schedule_id.clone();
+        let detail_result = tool
+            .execute(
+                serde_json::json!({
+                    "action": "get",
+                    "schedule_id": schedule_id
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(!detail_result.is_error);
+        let detail: serde_json::Value = serde_json::from_str(&detail_result.content).unwrap();
+        assert_eq!(detail["config"]["payload"]["kind"], "agent_turn");
+        assert_eq!(
+            detail["config"]["payload"]["message"],
+            "check budget status"
+        );
+        assert_eq!(detail["config"]["delivery"]["mode"], "announce");
+        assert_eq!(detail["config"]["delivery"]["connector_id"], "dc_main");
     }
 
     #[tokio::test]
@@ -639,6 +740,8 @@ mod tests {
         assert!(as_json.is_array());
         assert_eq!(as_json.as_array().unwrap().len(), 1);
         assert_eq!(as_json[0]["schedule_id"], "daily-report");
+        assert!(as_json[0]["next_run"].is_string() || as_json[0]["next_run"].is_null());
+        assert!(as_json[0]["next_run_ms"].is_number() || as_json[0]["next_run_ms"].is_null());
     }
 
     #[tokio::test]
