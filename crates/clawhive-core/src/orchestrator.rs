@@ -1795,10 +1795,6 @@ impl Orchestrator {
             return false;
         }
 
-        if Self::is_greeting_turn(trimmed) {
-            return false;
-        }
-
         let lower = trimmed.to_lowercase();
         let short_enough = trimmed.chars().count() <= 32;
         if !short_enough {
@@ -1853,32 +1849,6 @@ impl Orchestrator {
         confirmation_keywords
             .iter()
             .any(|keyword| lower.contains(keyword))
-    }
-
-    fn is_greeting_turn(text: &str) -> bool {
-        let lower = text.trim().to_lowercase();
-        let greetings = [
-            "早上好",
-            "早安",
-            "中午好",
-            "下午好",
-            "晚上好",
-            "你好",
-            "嗨",
-            "hello",
-            "hi",
-            "good morning",
-            "good afternoon",
-            "good evening",
-        ];
-
-        greetings.iter().any(|g| {
-            lower == *g
-                || lower.starts_with(&format!("{g}，"))
-                || lower.starts_with(&format!("{g},"))
-                || lower.starts_with(&format!("{g}！"))
-                || lower.starts_with(&format!("{g}!"))
-        })
     }
 
     /// Handle the flow after a /reset or /new command.
