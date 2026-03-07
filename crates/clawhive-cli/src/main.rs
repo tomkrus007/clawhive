@@ -367,7 +367,9 @@ async fn main() -> Result<()> {
     // Suppress stderr logs when running TUI modes or Logs to avoid corrupting the terminal.
     let is_tui_mode = matches!(
         cli.command,
-        Some(Commands::Code { .. }) | Some(Commands::Dashboard { .. }) | Some(Commands::Logs { .. })
+        Some(Commands::Code { .. })
+            | Some(Commands::Dashboard { .. })
+            | Some(Commands::Logs { .. })
     );
 
     if is_tui_mode {
