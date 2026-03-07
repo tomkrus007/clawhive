@@ -74,6 +74,17 @@ enum Commands {
         #[arg(long)]
         no_security: bool,
     },
+    #[command(about = "Start clawhive as a background daemon (alias for `start -d`)")]
+    Up {
+        #[arg(long, default_value = "8848", help = "HTTP API server port")]
+        port: u16,
+        /// Override security mode (overrides agent config)
+        #[arg(long, value_name = "MODE")]
+        security: Option<SecurityMode>,
+        /// Shorthand for --security off
+        #[arg(long)]
+        no_security: bool,
+    },
     #[command(about = "Stop a running clawhive process")]
     Stop,
     #[command(about = "Restart clawhive (stop + start)")]
@@ -423,6 +434,15 @@ async fn main() -> Result<()> {
             } else {
                 start_bot(&cli.config_root, tui, port, security_override).await?;
             }
+        }
+        Commands::Up {
+            port,
+            security,
+            no_security,
+        } => {
+            ensure_skeleton_config(&cli.config_root, port)?;
+            let security_override = resolve_security_override(security, no_security);
+            daemonize(&cli.config_root, false, port, security_override)?;
         }
         Commands::Stop => {
             stop_process(&cli.config_root)?;
