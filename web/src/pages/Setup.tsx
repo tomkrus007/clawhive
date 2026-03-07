@@ -2,7 +2,9 @@ import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import {
   useSetupStatus,
   useCreateProvider,
@@ -15,11 +17,97 @@ import {
   useProviderPresets,
   useRouting,
   useUpdateRouting,
+  useSetPassword,
 } from "@/hooks/use-api";
 import type { ProviderPreset } from "@/hooks/use-api";
 import { CheckCircle2, ChevronRight, ChevronLeft, Loader2, Zap, ExternalLink } from "lucide-react";
 
+import { toast } from "sonner";
+
 const STEP_LABELS = ["Provider", "Agent", "Channel", "Tools", "Launch"];
+
+// ---------------------------------------------------------------------------
+// Security Setup Component
+// ---------------------------------------------------------------------------
+function SecuritySetup() {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordSet, setPasswordSet] = useState(false);
+  const setPasswordMutation = useSetPassword();
+
+  const handleSetPassword = () => {
+    if (password !== confirmPassword) {
+      toast.error("Passwords do not match");
+      return;
+    }
+    if (password.length < 4) {
+      toast.error("Password must be at least 4 characters");
+      return;
+    }
+    setPasswordMutation.mutate(password, {
+      onSuccess: () => {
+        setPasswordSet(true);
+        toast.success("Admin password set successfully");
+      },
+      onError: (err) => toast.error(err.message || "Failed to set password"),
+    });
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          🔒 Admin Password
+          {passwordSet && <Badge variant="default" className="bg-green-600">Set</Badge>}
+        </CardTitle>
+        <CardDescription>
+          Optionally set a password to protect the web console. You can skip this step.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {passwordSet ? (
+          <p className="text-sm text-muted-foreground">
+            ✅ Password configured. You'll need to log in to access the console after setup.
+          </p>
+        ) : (
+          <div className="grid gap-3 max-w-sm">
+            <div className="grid gap-1.5">
+              <Label htmlFor="setup-password">Password</Label>
+              <Input
+                id="setup-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter password"
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="setup-confirm">Confirm Password</Label>
+              <Input
+                id="setup-confirm"
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Confirm password"
+              />
+            </div>
+            <Button
+              onClick={handleSetPassword}
+              disabled={!password || !confirmPassword || setPasswordMutation.isPending}
+              className="w-fit"
+            >
+              {setPasswordMutation.isPending ? "Setting..." : "Set Password"}
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Leave blank and click Next to skip. No password = no login required.
+            </p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 
 // ---------------------------------------------------------------------------
 // Main Setup Wizard
@@ -439,15 +527,18 @@ export default function SetupPage() {
             </div>
           )}
           {step === 4 && (
-            <StepLaunch
-              provider={selectedProvider}
-              agentName={agentName}
-              agentEmoji={agentEmoji}
-              model={selectedModel}
-              channel={channelKind}
-              onLaunch={handleLaunch}
-              restarting={restarting}
-            />
+            <>
+              <SecuritySetup />
+              <StepLaunch
+                provider={selectedProvider}
+                agentName={agentName}
+                agentEmoji={agentEmoji}
+                model={selectedModel}
+                channel={channelKind}
+                onLaunch={handleLaunch}
+                restarting={restarting}
+              />
+            </>
           )}
         </div>
 
