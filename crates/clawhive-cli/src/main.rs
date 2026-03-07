@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::TimeZone;
@@ -2010,10 +2010,16 @@ async fn start_bot(
     }
 
     // Start embedded HTTP API server
+    let web_password_hash = std::fs::read_to_string(root.join("config/main.yaml"))
+        .ok()
+        .and_then(|content| serde_yaml::from_str::<serde_yaml::Value>(&content).ok())
+        .and_then(|val| val["web_password_hash"].as_str().map(ToOwned::to_owned));
     let http_state = clawhive_server::state::AppState {
         root: root.to_path_buf(),
         bus: Arc::clone(&bus),
         gateway: Some(gateway.clone()),
+        web_password_hash,
+        session_store: Arc::new(RwLock::new(HashMap::<String, Instant>::new())),
         daemon_mode: false,
         port,
     };
