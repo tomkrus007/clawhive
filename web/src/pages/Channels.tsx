@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +18,22 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/ui/error-state";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+
+function UpdatedAgo({ dataUpdatedAt }: { dataUpdatedAt: number }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 5000);
+    return () => clearInterval(id);
+  }, []);
+  
+  if (!dataUpdatedAt) return null;
+  const seconds = Math.floor((Date.now() - dataUpdatedAt) / 1000);
+  const text = seconds < 5 ? "just now" : seconds < 60 ? `${seconds}s ago` : `${Math.floor(seconds / 60)}m ago`;
+  return <span className="text-xs text-muted-foreground">Updated {text}</span>;
+}
 
 const CHANNEL_META: Record<string, { label: string; description: string; color: string; tokenLink: string }> = {
   telegram: { label: "Telegram", description: "Bot API integration", color: "text-blue-500", tokenLink: "https://t.me/BotFather" },
@@ -168,15 +184,50 @@ function AddChannelDialog({
 }
 
 // ---------------------------------------------------------------------------
+// Channels Skeleton
+// ---------------------------------------------------------------------------
+function ChannelsSkeleton() {
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <Skeleton className="h-6 w-24" />
+          <Skeleton className="h-4 w-64 mt-1" />
+        </div>
+        <Skeleton className="h-9 w-32" />
+      </div>
+      <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i}>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <div className="flex flex-col space-y-1">
+                <Skeleton className="h-5 w-28" />
+                <Skeleton className="h-3 w-40" />
+              </div>
+            </CardHeader>
+            <CardContent className="pt-4">
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-3/4 mt-2" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
 export default function ChannelsPage() {
-  const { data: channels, isLoading } = useChannels();
-  const { data: statuses } = useChannelStatus();
+  const { data: channels, isLoading, isError, error, refetch } = useChannels();
+  const { data: statuses, dataUpdatedAt: statusesUpdatedAt } = useChannelStatus();
+
   const updateChannels = useUpdateChannels();
   const removeConnector = useRemoveConnector();
   const [tokens, setTokens] = useState<Record<string, string>>({});
   const [restartRequired, setRestartRequired] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ kind: string; id: string } | null>(null);
 
   const statusMap = new Map((statuses ?? []).map((item) => [`${item.kind}:${item.connector_id}`, item.status]));
 
@@ -238,13 +289,8 @@ export default function ChannelsPage() {
     }
   };
 
-  if (isLoading) {
-    return (
-      <div className="flex justify-center p-8">
-        <Loader2 className="h-8 w-8 animate-spin" />
-      </div>
-    );
-  }
+  if (isLoading) return <ChannelsSkeleton />;
+  if (isError) return <ErrorState message={error?.message} onRetry={refetch} />;
 
   return (
     <div className="space-y-6">
@@ -255,8 +301,12 @@ export default function ChannelsPage() {
           <h2 className="text-lg font-semibold">Channels</h2>
           <p className="text-sm text-muted-foreground">Manage messaging platform connections.</p>
         </div>
-        <AddChannelDialog existingKinds={existingKinds} onDone={() => setRestartRequired(true)} />
+        <div className="flex items-center gap-4">
+          <UpdatedAgo dataUpdatedAt={statusesUpdatedAt} />
+          <AddChannelDialog existingKinds={existingKinds} onDone={() => setRestartRequired(true)} />
+        </div>
       </div>
+
 
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
         {channelKeys.map((key) => {
@@ -307,7 +357,7 @@ export default function ChannelsPage() {
                             variant="ghost"
                             size="icon"
                             className="h-7 w-7"
-                            onClick={() => handleRemoveConnector(key, connector.connector_id)}
+                            onClick={() => setDeleteTarget({ kind: key, id: connector.connector_id })}
                             disabled={removeConnector.isPending}
                           >
                             <Trash2 className="h-4 w-4" />
@@ -351,6 +401,29 @@ export default function ChannelsPage() {
         );
         })}
       </div>
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => !open && setDeleteTarget(null)}
+        title="Remove Connector"
+        description={`Remove connector '${deleteTarget?.id}'? This cannot be undone.`}
+        confirmLabel="Remove"
+        variant="destructive"
+        loading={removeConnector.isPending}
+        onConfirm={() => {
+          if (!deleteTarget) return;
+          removeConnector.mutate(
+            { kind: deleteTarget.kind, connectorId: deleteTarget.id },
+            {
+              onSuccess: () => {
+                setRestartRequired(true);
+                toast.success("Connector removed");
+                setDeleteTarget(null);
+              },
+              onError: () => toast.error("Failed to remove connector"),
+            }
+          );
+        }}
+      />
     </div>
   );
 }
