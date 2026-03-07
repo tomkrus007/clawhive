@@ -3,9 +3,34 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
-import { useRunSchedule, useSchedules, useToggleSchedule } from "@/hooks/use-api";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  useRunSchedule,
+  useSchedules,
+  useToggleSchedule,
+  useScheduleDetail,
+  useUpdateSchedule,
+  useAgents,
+  type ScheduleDetail,
+} from "@/hooks/use-api";
 import { formatDistanceToNow } from "date-fns";
-import { AlertTriangle, Clock3, Loader2, Play } from "lucide-react";
+import { AlertTriangle, Clock3, Loader2, Play, Pencil, Save } from "lucide-react";
 import { toast } from "sonner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorState } from "@/components/ui/error-state";
@@ -50,6 +75,261 @@ function statusVariant(status: "ok" | "error" | "skipped" | null) {
 }
 
 // ---------------------------------------------------------------------------
+// Edit Schedule Dialog
+// ---------------------------------------------------------------------------
+function EditScheduleDialog({
+  scheduleId,
+  open,
+  onOpenChange,
+}: {
+  scheduleId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { data: detail, isLoading } = useScheduleDetail(scheduleId);
+  const { data: agents } = useAgents();
+  const updateMutation = useUpdateSchedule();
+
+  const [form, setForm] = useState<ScheduleDetail | null>(null);
+
+  // Populate form when detail loads
+  useEffect(() => {
+    if (detail && !form) {
+      setForm({ ...detail });
+    }
+  }, [detail, form]);
+
+  // Reset form when dialog closes
+  useEffect(() => {
+    if (!open) setForm(null);
+  }, [open]);
+
+  const handleSave = async () => {
+    if (!form) return;
+    try {
+      await updateMutation.mutateAsync({ id: scheduleId, data: form });
+      toast.success(`Updated: ${form.name}`);
+      onOpenChange(false);
+    } catch {
+      toast.error("Failed to update schedule");
+    }
+  };
+
+  const updateForm = (patch: Partial<ScheduleDetail>) => {
+    if (form) setForm({ ...form, ...patch });
+  };
+
+  const updateScheduleType = (kind: "cron" | "at" | "every") => {
+    if (!form) return;
+    if (kind === "cron") {
+      setForm({ ...form, schedule: { kind: "cron", expr: form.schedule.expr ?? "0 9 * * *", tz: form.schedule.tz ?? "UTC" } });
+    } else if (kind === "at") {
+      setForm({ ...form, schedule: { kind: "at", at: form.schedule.at ?? new Date().toISOString() } });
+    } else {
+      setForm({ ...form, schedule: { kind: "every", interval_ms: form.schedule.interval_ms ?? 60000 } });
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Edit Schedule</DialogTitle>
+          <DialogDescription>Modify schedule configuration. Changes take effect on next run.</DialogDescription>
+        </DialogHeader>
+
+        {isLoading || !form ? (
+          <div className="space-y-4 py-4">
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+        ) : (
+          <div className="space-y-4 py-2">
+            {/* Name */}
+            <div className="space-y-1.5">
+              <Label htmlFor="sched-name">Name</Label>
+              <Input
+                id="sched-name"
+                value={form.name}
+                onChange={(e) => updateForm({ name: e.target.value })}
+              />
+            </div>
+
+            {/* Description */}
+            <div className="space-y-1.5">
+              <Label htmlFor="sched-desc">Description</Label>
+              <Input
+                id="sched-desc"
+                value={form.description ?? ""}
+                onChange={(e) => updateForm({ description: e.target.value || null })}
+                placeholder="Optional description"
+              />
+            </div>
+
+            {/* Schedule Type */}
+            <div className="space-y-1.5">
+              <Label>Schedule Type</Label>
+              <Select value={form.schedule.kind} onValueChange={(v) => updateScheduleType(v as "cron" | "at" | "every")}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="cron">Cron</SelectItem>
+                  <SelectItem value="at">One-time (at)</SelectItem>
+                  <SelectItem value="every">Interval (every)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Cron fields */}
+            {form.schedule.kind === "cron" && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="sched-expr">Cron Expression</Label>
+                  <Input
+                    id="sched-expr"
+                    value={form.schedule.expr ?? ""}
+                    onChange={(e) => setForm({ ...form, schedule: { ...form.schedule, expr: e.target.value } })}
+                    placeholder="0 9 * * *"
+                    className="font-mono text-sm"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="sched-tz">Timezone</Label>
+                  <Input
+                    id="sched-tz"
+                    value={form.schedule.tz ?? ""}
+                    onChange={(e) => setForm({ ...form, schedule: { ...form.schedule, tz: e.target.value } })}
+                    placeholder="Asia/Singapore"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* At field */}
+            {form.schedule.kind === "at" && (
+              <div className="space-y-1.5">
+                <Label htmlFor="sched-at">Run At (ISO 8601)</Label>
+                <Input
+                  id="sched-at"
+                  value={form.schedule.at ?? ""}
+                  onChange={(e) => setForm({ ...form, schedule: { ...form.schedule, at: e.target.value } })}
+                  placeholder="2026-03-07T10:00:00+08:00"
+                  className="font-mono text-sm"
+                />
+              </div>
+            )}
+
+            {/* Every field */}
+            {form.schedule.kind === "every" && (
+              <div className="space-y-1.5">
+                <Label htmlFor="sched-interval">Interval (milliseconds)</Label>
+                <Input
+                  id="sched-interval"
+                  type="number"
+                  value={form.schedule.interval_ms ?? 60000}
+                  onChange={(e) => setForm({ ...form, schedule: { ...form.schedule, interval_ms: parseInt(e.target.value) || 0 } })}
+                />
+                <p className="text-xs text-muted-foreground">
+                  = {Math.round((form.schedule.interval_ms ?? 0) / 1000 / 60)} minutes
+                </p>
+              </div>
+            )}
+
+            {/* Agent */}
+            <div className="space-y-1.5">
+              <Label>Agent</Label>
+              <Select value={form.agent_id} onValueChange={(v) => updateForm({ agent_id: v })}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(agents ?? []).map((a) => (
+                    <SelectItem key={a.agent_id} value={a.agent_id}>
+                      {a.emoji} {a.name} ({a.agent_id})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Session Mode */}
+            <div className="space-y-1.5">
+              <Label>Session Mode</Label>
+              <Select value={form.session_mode} onValueChange={(v) => updateForm({ session_mode: v as "main" | "isolated" })}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="main">Main</SelectItem>
+                  <SelectItem value="isolated">Isolated</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Task */}
+            <div className="space-y-1.5">
+              <Label htmlFor="sched-task">Task</Label>
+              <textarea
+                id="sched-task"
+                className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                value={form.task}
+                onChange={(e) => updateForm({ task: e.target.value })}
+                placeholder="Task description / prompt"
+              />
+            </div>
+
+            {/* Timeout */}
+            <div className="space-y-1.5">
+              <Label htmlFor="sched-timeout">Timeout (seconds)</Label>
+              <Input
+                id="sched-timeout"
+                type="number"
+                value={form.timeout_seconds}
+                onChange={(e) => updateForm({ timeout_seconds: parseInt(e.target.value) || 0 })}
+              />
+            </div>
+
+            {/* Delivery (read-only summary) */}
+            {form.delivery && (
+              <div className="space-y-1.5">
+                <Label>Delivery</Label>
+                <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+                  Mode: <span className="font-medium text-foreground">{form.delivery.mode}</span>
+                  {form.delivery.channel && <> · Channel: <span className="font-medium text-foreground">{form.delivery.channel}</span></>}
+                  {form.delivery.connector_id && <> · Connector: <span className="font-medium text-foreground">{form.delivery.connector_id}</span></>}
+                </div>
+                <p className="text-xs text-muted-foreground">Delivery settings are read-only. Edit the YAML directly for advanced changes.</p>
+              </div>
+            )}
+
+            {/* Enabled */}
+            <div className="flex items-center justify-between">
+              <Label>Enabled</Label>
+              <Switch
+                checked={form.enabled}
+                onCheckedChange={(enabled) => updateForm({ enabled })}
+              />
+            </div>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button onClick={handleSave} disabled={updateMutation.isPending || !form}>
+            {updateMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
+            Save
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Schedules Skeleton
 // ---------------------------------------------------------------------------
 function SchedulesSkeleton() {
@@ -90,6 +370,7 @@ export default function SchedulesPage() {
   const { data: schedules, dataUpdatedAt: schedulesUpdatedAt, isLoading, isError, error, refetch } = useSchedules();
   const runMutation = useRunSchedule();
   const toggleMutation = useToggleSchedule();
+  const [editId, setEditId] = useState<string | null>(null);
 
   if (isLoading) return <SchedulesSkeleton />;
   if (isError) return <ErrorState message={error?.message} onRetry={refetch} />
@@ -111,25 +392,35 @@ export default function SchedulesPage() {
           : "-";
 
         return (
-          <Card key={item.schedule_id}>
+          <Card key={item.schedule_id} className="group cursor-pointer hover:ring-2 hover:ring-ring/20 transition-all" onClick={() => setEditId(item.schedule_id)}>
             <CardHeader className="space-y-2">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <CardTitle className="text-base">{item.name}</CardTitle>
                   <CardDescription className="mt-1 text-xs">{item.schedule_id}</CardDescription>
                 </div>
-                <Switch
-                  checked={item.enabled}
-                  disabled={toggleMutation.isPending}
-                  onCheckedChange={async (enabled) => {
-                    try {
-                      await toggleMutation.mutateAsync({ id: item.schedule_id, enabled });
-                      toast.success(`${enabled ? "Enabled" : "Disabled"}: ${item.name}`);
-                    } catch {
-                      toast.error(`Failed to update ${item.name}`);
-                    }
-                  }}
-                />
+                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+                    onClick={() => setEditId(item.schedule_id)}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
+                  <Switch
+                    checked={item.enabled}
+                    disabled={toggleMutation.isPending}
+                    onCheckedChange={async (enabled) => {
+                      try {
+                        await toggleMutation.mutateAsync({ id: item.schedule_id, enabled });
+                        toast.success(`${enabled ? "Enabled" : "Disabled"}: ${item.name}`);
+                      } catch {
+                        toast.error(`Failed to update ${item.name}`);
+                      }
+                    }}
+                  />
+                </div>
               </div>
               {item.description && <CardDescription>{item.description}</CardDescription>}
             </CardHeader>
@@ -162,7 +453,8 @@ export default function SchedulesPage() {
                 className="w-full"
                 variant="secondary"
                 disabled={runMutation.isPending}
-                onClick={async () => {
+                onClick={async (e) => {
+                  e.stopPropagation();
                   try {
                     await runMutation.mutateAsync(item.schedule_id);
                     toast.success(`Triggered: ${item.name}`);
@@ -179,7 +471,15 @@ export default function SchedulesPage() {
         );
       })}
       </div>
+
+      {/* Edit Dialog */}
+      {editId && (
+        <EditScheduleDialog
+          scheduleId={editId}
+          open={!!editId}
+          onOpenChange={(open) => { if (!open) setEditId(null); }}
+        />
+      )}
     </>
   );
-
 }

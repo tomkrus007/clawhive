@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorState } from "@/components/ui/error-state";
-import { Package, ShieldCheck, Plus, Loader2, AlertTriangle } from "lucide-react";
+import { Package, ShieldCheck, Plus, Loader2, AlertTriangle, FolderOpen } from "lucide-react";
 import {
   useSkills,
   useAnalyzeSkill,
@@ -204,25 +204,31 @@ function InstallSkillDialog({ onInstalled }: { onInstalled: () => void }) {
 }
 
 // ---------------------------------------------------------------------------
-// Skeleton rows for loading state
+// Skeleton cards for loading state
 // ---------------------------------------------------------------------------
-function SkillTableSkeleton() {
+function SkillCardsSkeleton() {
   return (
-    <>
-      {Array.from({ length: 4 }).map((_, i) => (
-        <TableRow key={i}>
-          <TableCell>
-            <Skeleton className="h-4 w-32" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-4 w-56" />
-          </TableCell>
-          <TableCell>
-            <Skeleton className="h-5 w-16 rounded-full" />
-          </TableCell>
-        </TableRow>
+    <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+      {Array.from({ length: 3 }).map((_, i) => (
+        <Card key={i}>
+          <CardHeader className="space-y-2">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <Skeleton className="h-10 w-10 rounded-lg" />
+                <div>
+                  <Skeleton className="h-5 w-28" />
+                  <Skeleton className="h-3.5 w-44 mt-1.5" />
+                </div>
+              </div>
+              <Skeleton className="h-5 w-20 rounded-full" />
+            </div>
+          </CardHeader>
+          <CardContent>
+            <Skeleton className="h-3.5 w-48" />
+          </CardContent>
+        </Card>
       ))}
-    </>
+    </div>
   );
 }
 
@@ -233,9 +239,12 @@ export default function SkillsPage() {
   const { data: skills, isLoading, isError, error, refetch } = useSkills();
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold tracking-tight">Skills</h2>
+        <div>
+          <h1 className="text-xl font-semibold">Skills</h1>
+          <p className="text-sm text-muted-foreground">Installed skills extend your agents with extra tools and capabilities</p>
+        </div>
         <InstallSkillDialog onInstalled={() => refetch()} />
       </div>
 
@@ -245,65 +254,62 @@ export default function SkillsPage() {
           message={(error as Error)?.message}
           onRetry={() => refetch()}
         />
+      ) : isLoading ? (
+        <SkillCardsSkeleton />
+      ) : skills?.length === 0 ? (
+        <EmptyState
+          icon={<Package className="h-10 w-10" />}
+          title="No skills installed"
+          description="Skills extend your agents with extra tools and capabilities."
+          action={{
+            label: "Install Skill",
+            onClick: () => {
+              document
+                .querySelector<HTMLButtonElement>('[data-install-trigger]')
+                ?.click();
+            },
+          }}
+        />
       ) : (
-        <div className="rounded-md border bg-card">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Description</TableHead>
-                <TableHead>Permissions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {isLoading ? (
-                <SkillTableSkeleton />
-              ) : skills?.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={3} className="p-0">
-                    <EmptyState
-                      icon={<Package className="h-10 w-10" />}
-                      title="No skills installed"
-                      description="Skills extend your agents with extra tools and capabilities."
-                      action={{
-                        label: "Install Skill",
-                        onClick: () => {
-                          // Trigger the dialog — handled via button in header
-                          document
-                            .querySelector<HTMLButtonElement>('[data-install-trigger]')
-                            ?.click();
-                        },
-                      }}
-                    />
-                  </TableCell>
-                </TableRow>
-              ) : (
-                skills?.map((skill) => (
-                  <TableRow key={skill.path}>
-                    <TableCell className="font-medium font-mono text-sm">
-                      {skill.name}
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {skill.description || <span className="italic">No description</span>}
-                    </TableCell>
-                    <TableCell>
-                      {skill.has_permissions ? (
-                        <Badge
-                          variant="outline"
-                          className="gap-1 border-amber-500/40 text-amber-600 dark:text-amber-400"
-                        >
-                          <ShieldCheck className="h-3 w-3" />
-                          Permissions
-                        </Badge>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          {skills?.map((skill) => (
+            <Card key={skill.path} className="group">
+              <CardHeader className="space-y-1">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+                      <Package className="h-5 w-5 text-primary" />
+                    </div>
+                    <div className="min-w-0">
+                      <CardTitle className="text-base font-mono truncate">{skill.name}</CardTitle>
+                    </div>
+                  </div>
+                  {skill.has_permissions ? (
+                    <Badge
+                      variant="outline"
+                      className="shrink-0 gap-1 border-amber-500/40 text-amber-600 dark:text-amber-400"
+                    >
+                      <ShieldCheck className="h-3 w-3" />
+                      Permissions
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="shrink-0 gap-1 text-muted-foreground">
+                      Sandboxed
+                    </Badge>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <CardDescription className="line-clamp-2">
+                  {skill.description || <span className="italic">No description</span>}
+                </CardDescription>
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <FolderOpen className="h-3 w-3" />
+                  <span className="truncate font-mono">{skill.path}</span>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
       )}
     </div>
