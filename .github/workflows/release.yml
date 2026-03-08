@@ -34,6 +34,9 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Build frontend
+        run: cd web && bun install && bun run build
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
