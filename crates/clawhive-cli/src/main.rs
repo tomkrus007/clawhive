@@ -447,10 +447,10 @@ async fn main() -> Result<()> {
             daemonize(&cli.config_root, false, port, security_override)?;
             // Brief pause to let the daemon start and write its PID file
             tokio::time::sleep(Duration::from_millis(800)).await;
-            print_status(&cli.config_root);
+            commands::status::print_status(&cli.config_root);
         }
         Commands::Status => {
-            print_status(&cli.config_root);
+            commands::status::print_status(&cli.config_root);
         }
         Commands::Stop => {
             stop_process(&cli.config_root)?;
@@ -1760,109 +1760,6 @@ fn ensure_skeleton_config(root: &Path, port: u16) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Status display
-// ---------------------------------------------------------------------------
-
-fn print_status(root: &Path) {
-    let pid_info = match read_pid_file(root) {
-        Ok(Some(pid)) if is_process_running(pid) => Some(pid),
-        Ok(Some(_)) => None, // stale PID
-        _ => None,
-    };
-
-    let running = pid_info.is_some();
-
-    // Header
-    if running {
-        println!(
-            "  clawhive is \x1b[32mrunning\x1b[0m (pid: {})",
-            pid_info.unwrap()
-        );
-    } else {
-        println!("  clawhive is \x1b[31mstopped\x1b[0m");
-    }
-    println!();
-
-    // Config info
-    let config_path = root.join("config");
-    match load_config(&config_path) {
-        Ok(config) => {
-            // Agents
-            let enabled_agents: Vec<_> = config.agents.iter().filter(|a| a.enabled).collect();
-            println!(
-                "  Agents:      {} configured, {} enabled",
-                config.agents.len(),
-                enabled_agents.len()
-            );
-            for agent in &enabled_agents {
-                println!(
-                    "               \x1b[36m{}\x1b[0m (model: {})",
-                    agent.agent_id, agent.model_policy.primary
-                );
-            }
-
-            // Providers
-            let enabled_providers: Vec<_> = config.providers.iter().filter(|p| p.enabled).collect();
-            println!(
-                "  Providers:   {} configured, {} enabled",
-                config.providers.len(),
-                enabled_providers.len()
-            );
-            for p in &enabled_providers {
-                let key_status = if p.api_key.as_ref().is_some_and(|k| !k.is_empty()) {
-                    "\x1b[32m✓ key set\x1b[0m"
-                } else if p.auth_profile.is_some() {
-                    "\x1b[32m✓ oauth\x1b[0m"
-                } else {
-                    "\x1b[33m✗ no key\x1b[0m"
-                };
-                println!(
-                    "               \x1b[36m{}\x1b[0m ({})",
-                    p.provider_id, key_status
-                );
-            }
-
-            // Channels
-            let mut channels: Vec<&str> = Vec::new();
-            if config.main.channels.telegram.is_some() {
-                channels.push("telegram");
-            }
-            if config.main.channels.discord.is_some() {
-                channels.push("discord");
-            }
-            if channels.is_empty() {
-                println!("  Channels:    \x1b[33mnone configured\x1b[0m");
-            } else {
-                println!(
-                    "  Channels:    {}",
-                    channels
-                        .iter()
-                        .map(|c| format!("\x1b[36m{}\x1b[0m", c))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-
-            // Routing
-            println!(
-                "  Routing:     {} bindings (default: \x1b[36m{}\x1b[0m)",
-                config.routing.bindings.len(),
-                config.routing.default_agent_id
-            );
-        }
-        Err(_) => {
-            println!("  Config:      \x1b[33mnot found — run `clawhive setup`\x1b[0m");
-        }
-    }
-
-    // Paths
-    println!();
-    println!("  Config dir:  {}", root.join("config").display());
-    println!("  Data dir:    {}", root.join("data").display());
-    println!("  Log dir:     {}", root.join("logs").display());
-}
-
-// ---------------------------------------------------------------------------
 // PID file management
 // ---------------------------------------------------------------------------
 
@@ -1876,7 +1773,7 @@ fn write_pid_file(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_pid_file(root: &Path) -> Result<Option<u32>> {
+pub(crate) fn read_pid_file(root: &Path) -> Result<Option<u32>> {
     let path = pid_file_path(root);
     match std::fs::read_to_string(&path) {
         Ok(content) => {
@@ -1892,7 +1789,7 @@ fn remove_pid_file(root: &Path) {
     let _ = std::fs::remove_file(pid_file_path(root));
 }
 
-fn is_process_running(pid: u32) -> bool {
+pub(crate) fn is_process_running(pid: u32) -> bool {
     // kill(pid, 0) checks if process exists without sending a signal
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
