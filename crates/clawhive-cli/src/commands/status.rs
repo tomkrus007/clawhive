@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use console::style;
 use clawhive_core::load_config;
+use console::style;
 
 use crate::{is_process_running, read_pid_file};
 
