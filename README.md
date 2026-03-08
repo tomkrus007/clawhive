@@ -170,7 +170,7 @@ After installation, configure providers, agents, and channels using either metho
 
 ```bash
 clawhive start
-# Open http://localhost:3000/setup in your browser
+# Open http://localhost:8848/setup in your browser
 ```
 
 **Option B: CLI Setup Wizard** — Run the interactive terminal wizard:
@@ -198,11 +198,11 @@ clawhive stop
 
 # Dashboard mode (observability TUI)
 clawhive dashboard
-clawhive dashboard --port 3000
+clawhive dashboard --port 8848
 
 # Code mode (developer TUI)
 clawhive code
-clawhive code --port 3000
+clawhive code --port 8848
 
 # Agents / sessions
 clawhive agent list
@@ -248,11 +248,11 @@ cargo run -- stop
 
 # Dashboard mode (observability TUI)
 cargo run -- dashboard
-cargo run -- dashboard --port 3000
+cargo run -- dashboard --port 8848
 
 # Coding agent mode (attach local TUI channel to running gateway)
 cargo run -- code
-cargo run -- code --port 3000
+cargo run -- code --port 8848
 ```
 
 ## Developer Workflow
