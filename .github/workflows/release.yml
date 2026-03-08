@@ -40,6 +40,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Add rust target
         run: rustup target add ${{ matrix.target }}
