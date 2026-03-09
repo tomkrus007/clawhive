@@ -110,7 +110,7 @@ pub struct DingTalkClient {
     client_id: String,
     client_secret: String,
     http: reqwest::Client,
-    session_webhooks: Arc<RwLock<HashMap<String, String>>>,
+    session_webhooks: Arc<RwLock<HashMap<String, (String, i64)>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,11 +150,16 @@ impl DingTalkClient {
         Ok(resp)
     }
 
-    // TODO: Store session_webhook_expired_time alongside webhook and check before use.
-    // Expired webhooks will cause silent reply failures. Consider fallback delivery.
-    pub async fn cache_session_webhook(&self, conversation_id: &str, webhook: &str) {
+    pub async fn cache_session_webhook(
+        &self,
+        conversation_id: &str,
+        webhook: &str,
+        expired_time: Option<i64>,
+    ) {
+        // Default to 90 minutes from now if no expiry provided
+        let expiry = expired_time.unwrap_or_else(|| Utc::now().timestamp_millis() + 90 * 60 * 1000);
         let mut map = self.session_webhooks.write().await;
-        map.insert(conversation_id.to_string(), webhook.to_string());
+        map.insert(conversation_id.to_string(), (webhook.to_string(), expiry));
     }
 
     pub async fn reply_via_session_webhook(
@@ -162,13 +167,22 @@ impl DingTalkClient {
         conversation_id: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        let webhook = {
+        let entry = {
             let map = self.session_webhooks.read().await;
             map.get(conversation_id).cloned()
         };
 
-        let webhook = webhook
+        let (webhook, expired_time) = entry
             .ok_or_else(|| anyhow::anyhow!("dingtalk: no session webhook for {conversation_id}"))?;
+
+        if Utc::now().timestamp_millis() > expired_time {
+            // Remove stale entry
+            self.session_webhooks.write().await.remove(conversation_id);
+            anyhow::bail!(
+                "dingtalk: session webhook expired for {conversation_id}, \
+                 will use fresh webhook from next message"
+            );
+        }
 
         self.http
             .post(&webhook)
@@ -356,7 +370,11 @@ impl DingTalkBot {
                     Ok(callback) => {
                         if let Some(ref webhook) = callback.session_webhook {
                             client
-                                .cache_session_webhook(&callback.conversation_id, webhook)
+                                .cache_session_webhook(
+                                    &callback.conversation_id,
+                                    webhook,
+                                    callback.session_webhook_expired_time,
+                                )
                                 .await;
                         }
 
