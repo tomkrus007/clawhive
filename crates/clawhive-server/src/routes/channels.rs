@@ -228,12 +228,29 @@ fn connectors_mut<'a>(
     let channels = root["channels"]
         .as_mapping_mut()
         .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    let channel = channels
-        .get_mut(serde_yaml::Value::String(kind.to_string()))
-        .ok_or(axum::http::StatusCode::NOT_FOUND)?;
-    let channel_map = channel
-        .as_mapping_mut()
+    let kind_key = serde_yaml::Value::String(kind.to_string());
+    // Auto-create channel kind with enabled: true if missing
+    if !channels.contains_key(&kind_key) {
+        let mut new_channel = serde_yaml::Mapping::new();
+        new_channel.insert(
+            serde_yaml::Value::String("enabled".to_string()),
+            serde_yaml::Value::Bool(true),
+        );
+        new_channel.insert(
+            serde_yaml::Value::String("connectors".to_string()),
+            serde_yaml::Value::Sequence(Vec::new()),
+        );
+        channels.insert(kind_key.clone(), serde_yaml::Value::Mapping(new_channel));
+    }
+    let channel_map = channels
+        .get_mut(&kind_key)
+        .and_then(|v| v.as_mapping_mut())
         .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Ensure enabled is true when adding a connector
+    channel_map.insert(
+        serde_yaml::Value::String("enabled".to_string()),
+        serde_yaml::Value::Bool(true),
+    );
     let connectors = channel_map
         .entry(serde_yaml::Value::String("connectors".to_string()))
         .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
@@ -241,7 +258,6 @@ fn connectors_mut<'a>(
         .as_sequence_mut()
         .ok_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
 }
-
 async fn add_connector(
     State(state): State<AppState>,
     Path(kind): Path<String>,
