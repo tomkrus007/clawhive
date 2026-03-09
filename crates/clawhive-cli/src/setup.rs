@@ -17,6 +17,7 @@ use clawhive_core::config::{
     TelegramChannelConfig, TelegramConnectorConfig, WeComChannelConfig, WeComConnectorConfig,
     WebSearchConfig,
 };
+use clawhive_schema::provider_presets::model_info;
 
 use crate::setup_scan::{scan_config, ConfigState};
 use crate::setup_ui::{print_done, print_logo, render_dashboard, ARROW, CRAB};
@@ -497,10 +498,20 @@ fn handle_add_agent(
     }
     models.push("Custom…".to_string());
 
-    let model_labels: Vec<&str> = models.iter().map(String::as_str).collect();
+    let model_labels: Vec<String> = models
+        .iter()
+        .map(|m| {
+            if m == "Custom…" {
+                m.clone()
+            } else {
+                format_model_label(m)
+            }
+        })
+        .collect();
+    let model_labels_refs: Vec<&str> = model_labels.iter().map(String::as_str).collect();
     let selected = Select::with_theme(theme)
         .with_prompt("Primary model")
-        .items(&model_labels)
+        .items(&model_labels_refs)
         .default(0)
         .interact()?;
 
@@ -1560,6 +1571,28 @@ fn generate_routing_yaml(
 
 fn provider_models_for_id(provider_id: &str) -> Vec<String> {
     clawhive_schema::provider_presets::provider_models_for_id(provider_id)
+}
+
+fn format_model_label(model_id: &str) -> String {
+    let parts: Vec<&str> = model_id.splitn(2, '/').collect();
+    if parts.len() == 2 {
+        if let Some(info) = model_info(parts[0], parts[1]) {
+            let ctx = if info.context_window >= 1_000_000 {
+                format!("{}M", info.context_window / 1_000_000)
+            } else {
+                format!("{}k", info.context_window / 1000)
+            };
+            let mut tags = vec![format!("{ctx} ctx")];
+            if info.reasoning {
+                tags.push("reasoning".into());
+            }
+            if info.vision {
+                tags.push("vision".into());
+            }
+            return format!("{model_id} ({})", tags.join(", "));
+        }
+    }
+    model_id.to_string()
 }
 
 fn unix_timestamp() -> Result<i64> {

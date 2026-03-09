@@ -116,13 +116,34 @@ struct ListModelsRequest {
 }
 
 #[derive(Serialize)]
+struct ModelInfoResponse {
+    id: String,
+    context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
+    reasoning: bool,
+    vision: bool,
+}
+
+#[derive(Serialize)]
 struct ListModelsResponse {
-    models: Vec<String>,
+    models: Vec<ModelInfoResponse>,
+}
+fn is_non_chat_model(model_id: &str) -> bool {
+    let id = model_id.to_lowercase();
+    id.contains("embed")
+        || id.contains("moderation")
+        || id.contains("tts")
+        || id.contains("whisper")
+        || id.contains("dall-e")
+        || id.contains("davinci")
+        || id.contains("babbage")
 }
 
 async fn list_models_handler(
     Json(req): Json<ListModelsRequest>,
 ) -> Result<Json<ListModelsResponse>, axum::http::StatusCode> {
+    let provider_id = req.provider_type.clone();
+
     let provider_type: clawhive_provider::ProviderType =
         serde_json::from_value(serde_json::Value::String(req.provider_type))
             .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
@@ -138,10 +159,47 @@ async fn list_models_handler(
     let provider = clawhive_provider::create_provider(&config)
         .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
 
-    let models = provider.list_models().await.map_err(|e| {
-        tracing::warn!("list_models failed: {e}");
-        axum::http::StatusCode::BAD_GATEWAY
-    })?;
+    let api_models = match provider.list_models().await {
+        Ok(models) => models,
+        Err(e) => {
+            tracing::warn!(provider = %provider_id, error = %e, "failed to fetch models from API, falling back to presets");
+            vec![]
+        }
+    };
+
+    let models: Vec<ModelInfoResponse> = if api_models.is_empty() {
+        // Fallback to static presets
+        clawhive_schema::provider_presets::preset_by_id(&provider_id)
+            .map(|p| {
+                p.models
+                    .iter()
+                    .map(|m| ModelInfoResponse {
+                        id: m.id.to_string(),
+                        context_window: Some(m.context_window),
+                        max_output_tokens: Some(m.max_output_tokens),
+                        reasoning: m.reasoning,
+                        vision: m.vision,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        // Merge API results with preset metadata
+        api_models
+            .into_iter()
+            .filter(|id| !is_non_chat_model(id))
+            .map(|id| {
+                let info = clawhive_schema::provider_presets::model_info(&provider_id, &id);
+                ModelInfoResponse {
+                    context_window: info.map(|p| p.context_window),
+                    max_output_tokens: info.map(|p| p.max_output_tokens),
+                    reasoning: info.is_some_and(|p| p.reasoning),
+                    vision: info.is_some_and(|p| p.vision),
+                    id,
+                }
+            })
+            .collect()
+    };
 
     Ok(Json(ListModelsResponse { models }))
 }

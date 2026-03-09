@@ -44,6 +44,7 @@ fn test_full_agent() -> FullAgentConfig {
             primary: "stub".to_string(),
             fallbacks: vec![],
             thinking_level: None,
+            context_window: None,
         },
         tool_policy: None,
         memory_policy: None,

@@ -20,12 +20,13 @@ import {
   useSetPassword,
   useListModels,
 } from "@/hooks/use-api";
-import type { ProviderPreset } from "@/hooks/use-api";
+import type { ProviderPreset, ModelInfoResponse, ModelPresetInfo } from "@/hooks/use-api";
 import { CheckCircle2, ChevronRight, ChevronLeft, Loader2, Zap, ExternalLink, RefreshCw } from "lucide-react";
 
 import { toast } from "sonner";
 
 const STEP_LABELS = ["Provider", "Agent", "Channel", "Tools", "Launch"];
+
 
 // ---------------------------------------------------------------------------
 // Security Setup Component
@@ -132,7 +133,7 @@ export default function SetupPage() {
   const [agentCreated, setAgentCreated] = useState(false);
   const [agentId, setAgentId] = useState("clawhive-main");
   const [thinkingLevel, setThinkingLevel] = useState<string>("none");
-  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchedModels, setFetchedModels] = useState<ModelInfoResponse[]>([]);
 
   // Step 3: Channel
   const [channelKind, setChannelKind] = useState<"telegram" | "discord" | "feishu" | "dingtalk" | "wecom" | null>(null);
@@ -192,7 +193,7 @@ export default function SetupPage() {
     if (selectedProvider) {
       setApiBase(selectedProvider.api_base);
       if (selectedProvider.models.length > 0) {
-        setSelectedModel(selectedProvider.models[0]);
+        setSelectedModel(selectedProvider.models[0].id);
       }
     }
   }, [selectedProvider]);
@@ -233,7 +234,7 @@ export default function SetupPage() {
       });
       setFetchedModels(result.models);
       if (result.models.length > 0 && !selectedModel) {
-        setSelectedModel(result.models[0]);
+        setSelectedModel(result.models[0].id);
       }
       toast.success(`Fetched ${result.models.length} models`);
     } catch {
@@ -718,7 +719,7 @@ function StepProvider({
 
             <div className="flex items-center justify-between">
               <p className="text-xs text-muted-foreground">
-                Models: {selected.models.join(", ")}
+                Models: {selected.models.map(m => m.id).join(", ")}
               </p>
               {isCreated ? (
                 <span className="flex items-center gap-1 text-xs font-medium text-emerald-600">
@@ -780,7 +781,7 @@ function StepAgent({
   onNameChange: (v: string) => void;
   emoji: string;
   onEmojiChange: (v: string) => void;
-  models: string[];
+  models: (ModelPresetInfo | ModelInfoResponse)[];
   selectedModel: string;
   onModelChange: (v: string) => void;
   thinkingLevel: string;
@@ -876,16 +877,23 @@ function StepAgent({
           <div className="mt-1.5 flex flex-wrap gap-2">
             {models.map((m) => (
               <button
-                key={m}
-                onClick={() => { if (!isCreated) { setCustomModel(false); onModelChange(m); } }}
+                key={m.id}
+                onClick={() => { if (!isCreated) { setCustomModel(false); onModelChange(m.id); } }}
                 disabled={isCreated}
                 className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-all ${
-                  selectedModel === m && !customModel
+                  selectedModel === m.id && !customModel
                     ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/20"
                     : "border-border hover:border-primary/40"
                 } ${isCreated ? "cursor-not-allowed" : "cursor-pointer"}`}
               >
-                {m}
+                <span className="block">{m.id}</span>
+                <span className="block text-[10px] text-muted-foreground font-normal">
+                  {[
+                    m.context_window ? (m.context_window >= 1_000_000 ? `${(m.context_window / 1_000_000).toFixed(0)}M` : `${Math.round(m.context_window / 1000)}k`) : null,
+                    m.reasoning ? "reasoning" : null,
+                    m.vision ? "vision" : null,
+                  ].filter(Boolean).join(" · ") || ""}
+                </span>
               </button>
             ))}
             <button

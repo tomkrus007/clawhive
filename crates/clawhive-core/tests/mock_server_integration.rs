@@ -85,6 +85,7 @@ fn make_orchestrator_with_provider(
             primary: "sonnet".into(),
             fallbacks: vec![],
             thinking_level: None,
+            context_window: None,
         },
         tool_policy: None,
         memory_policy: None,
@@ -375,6 +376,7 @@ async fn mock_server_fallback_on_failure() {
             primary: "primary/claude-sonnet-4-5".to_string(),
             fallbacks: vec!["fallback/claude-sonnet-4-5".to_string()],
             thinking_level: None,
+            context_window: None,
         },
     };
 

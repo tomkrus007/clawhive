@@ -155,6 +155,14 @@ export interface ListModelsRequest {
   base_url?: string;
 }
 
+export interface ModelInfoResponse {
+  id: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  reasoning: boolean;
+  vision: boolean;
+}
+
 // Setup hooks
 export function useSetupStatus() {
   return useQuery({
@@ -181,7 +189,7 @@ export function useCreateProvider() {
 export function useListModels() {
   return useMutation({
     mutationFn: (data: ListModelsRequest) =>
-      apiFetch<{ models: string[] }>("/api/setup/list-models", {
+      apiFetch<{ models: ModelInfoResponse[] }>("/api/setup/list-models", {
         method: "POST",
         body: JSON.stringify(data),
       }),
@@ -462,6 +470,14 @@ export function useActionbookConfig() {
   });
 }
 
+export interface ModelPresetInfo {
+  id: string;
+  context_window: number;
+  max_output_tokens: number;
+  reasoning: boolean;
+  vision: boolean;
+}
+
 export interface ProviderPreset {
   id: string;
   name: string;
@@ -469,7 +485,7 @@ export interface ProviderPreset {
   needs_key: boolean;
   needs_base_url: boolean;
   default_model: string;
-  models: string[];
+  models: ModelPresetInfo[];
 }
 
 export function useProviderPresets() {

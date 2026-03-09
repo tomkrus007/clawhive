@@ -151,4 +151,11 @@ mod tests {
         let provider = qianfan("sk-test");
         assert!(std::mem::size_of_val(&provider) > 0);
     }
+
+    #[test]
+    fn compat_providers_are_openai_provider() {
+        // All compat providers return OpenAiProvider which implements LlmProvider
+        let provider = deepseek("test-key");
+        let _: Box<dyn crate::LlmProvider> = Box::new(provider);
+    }
 }

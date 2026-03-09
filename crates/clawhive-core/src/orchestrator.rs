@@ -1408,11 +1408,24 @@ impl Orchestrator {
                 "tool_use_loop: iteration start"
             );
 
-            // Check if we need to compact context
-            let (compacted_messages, compaction_result) = self
-                .context_manager
-                .ensure_within_limits(primary, messages)
-                .await?;
+            // Resolve per-model context manager so each agent uses its own context window
+            let ctx_mgr = {
+                let parts: Vec<&str> = primary.splitn(2, '/').collect();
+                if parts.len() == 2 {
+                    if let Some(info) =
+                        clawhive_schema::provider_presets::model_info(parts[0], parts[1])
+                    {
+                        self.context_manager
+                            .for_context_window(info.context_window as usize)
+                    } else {
+                        self.context_manager.clone()
+                    }
+                } else {
+                    self.context_manager.clone()
+                }
+            };
+            let (compacted_messages, compaction_result) =
+                ctx_mgr.ensure_within_limits(primary, messages).await?;
             messages = compacted_messages;
 
             if let Some(ref result) = compaction_result {

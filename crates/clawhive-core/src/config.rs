@@ -915,6 +915,7 @@ mod tests {
                     primary: "m".into(),
                     fallbacks: vec![],
                     thinking_level: None,
+                    context_window: None,
                 },
                 tool_policy: None,
                 memory_policy: None,
