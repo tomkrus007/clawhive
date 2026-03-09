@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -15,7 +14,6 @@ mod setup;
 mod setup_scan;
 mod setup_ui;
 
-use clawhive_bus::EventBus;
 use clawhive_channels::dingtalk::DingTalkBot;
 use clawhive_channels::discord::DiscordBot;
 use clawhive_channels::feishu::FeishuBot;
@@ -27,7 +25,6 @@ use clawhive_core::*;
 use clawhive_gateway::{
     spawn_approval_delivery_listener, spawn_scheduled_task_listener, spawn_wait_task_listener,
 };
-use clawhive_schema::InboundMessage;
 use commands::auth::{handle_auth_command, AuthCommands};
 use runtime::bootstrap::{
     bootstrap, build_embedding_provider, build_router_from_config, resolve_security_override,
@@ -37,7 +34,6 @@ use runtime::pid::{
 };
 use runtime::skeleton::ensure_skeleton_config;
 use setup::run_setup;
-use tokio::time::sleep;
 
 /// Default HTTP API server port.
 const DEFAULT_PORT: u16 = 8848;
@@ -301,22 +297,20 @@ async fn main() -> Result<()> {
             security,
             no_security,
         } => {
-            let security_override = resolve_security_override(security, no_security);
-            run_code_tui(&cli.config_root, port, security_override).await?;
+            commands::code::run(&cli.config_root, port, security, no_security).await?;
         }
         Commands::Dashboard { port } => {
-            run_dashboard_tui(port).await?;
+            commands::dashboard::run(port).await?;
         }
         Commands::Chat {
             agent,
             security,
             no_security,
         } => {
-            let security_override = resolve_security_override(security, no_security);
-            run_repl(&cli.config_root, &agent, security_override).await?;
+            commands::chat::run(&cli.config_root, agent, security, no_security).await?;
         }
         Commands::Consolidate => {
-            run_consolidate(&cli.config_root).await?;
+            commands::consolidate::run(&cli.config_root).await?;
         }
         Commands::Agent(cmd) => {
             commands::agent::run(cmd, &cli.config_root)?;
@@ -875,216 +869,6 @@ async fn start_bot(
         _ = shutdown_signal => {
             remove_pid_file(&root_for_cleanup);
             tracing::info!("PID file cleaned up. Goodbye.");
-        }
-    }
-
-    Ok(())
-}
-
-async fn run_consolidate(root: &Path) -> Result<()> {
-    let (_bus, memory, _gateway, config, _schedule_manager, _wait_manager, _approval_registry) =
-        bootstrap(root, None).await?;
-
-    let workspace_dir = root.to_path_buf();
-    let file_store = clawhive_memory::file_store::MemoryFileStore::new(&workspace_dir);
-    let consolidation_search_index = clawhive_memory::search_index::SearchIndex::new(memory.db());
-    let consolidation_embedding_provider = build_embedding_provider(&config).await;
-    let consolidator = Arc::new(
-        HippocampusConsolidator::new(
-            file_store.clone(),
-            Arc::new(build_router_from_config(&config)),
-            "sonnet".to_string(),
-            vec!["haiku".to_string()],
-        )
-        .with_search_index(consolidation_search_index)
-        .with_embedding_provider(consolidation_embedding_provider)
-        .with_file_store_for_reindex(file_store),
-    );
-
-    let scheduler = ConsolidationScheduler::new(consolidator, 24);
-    println!("Running hippocampus consolidation...");
-    let report = scheduler.run_once().await?;
-    println!("Consolidation complete:");
-    println!("  Daily files read: {}", report.daily_files_read);
-    println!("  Memory updated: {}", report.memory_updated);
-    println!("  Reindexed: {}", report.reindexed);
-    println!("  Summary: {}", report.summary);
-    Ok(())
-}
-
-async fn run_dashboard_tui(port: u16) -> Result<()> {
-    let base_url = format!("http://127.0.0.1:{port}");
-    let metrics_url = format!("{base_url}/api/events/metrics");
-    let stream_url = format!("{base_url}/api/events/stream");
-
-    let client = reqwest::Client::new();
-    let probe = client
-        .get(&metrics_url)
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await;
-
-    match probe {
-        Ok(resp) if resp.status().is_success() => {}
-        Ok(resp) => {
-            anyhow::bail!(
-                "Gateway not ready at {base_url} (HTTP {}). Start it first with `clawhive start`.",
-                resp.status()
-            );
-        }
-        Err(err) => {
-            anyhow::bail!(
-                "Cannot connect to Gateway at {base_url}: {err}. Start it first with `clawhive start`."
-            );
-        }
-    }
-
-    let bus = EventBus::new(1024);
-    let publisher = bus.publisher();
-    let stream_url_bg = stream_url.clone();
-    tokio::spawn(async move {
-        if let Err(err) = forward_sse_to_bus(stream_url_bg, publisher).await {
-            tracing::error!("dev stream relay stopped: {err}");
-        }
-    });
-
-    clawhive_tui::run_tui(&bus, None).await
-}
-
-async fn run_code_tui(
-    root: &Path,
-    port: u16,
-    security_override: Option<SecurityMode>,
-) -> Result<()> {
-    let _ = port;
-    let (bus, _memory, gateway, _config, _schedule_manager, _wait_manager, approval_registry) =
-        bootstrap(root, security_override).await?;
-    clawhive_tui::run_code_tui(bus.as_ref(), gateway, Some(approval_registry)).await
-}
-
-async fn forward_sse_to_bus(
-    stream_url: String,
-    publisher: clawhive_bus::BusPublisher,
-) -> Result<()> {
-    let client = reqwest::Client::new();
-
-    loop {
-        let response = client
-            .get(&stream_url)
-            .header("accept", "text/event-stream")
-            .send()
-            .await;
-
-        let mut response = match response {
-            Ok(resp) if resp.status().is_success() => resp,
-            Ok(resp) => {
-                tracing::warn!("dev stream connect failed: HTTP {}", resp.status());
-                sleep(Duration::from_millis(800)).await;
-                continue;
-            }
-            Err(err) => {
-                tracing::warn!("dev stream connect error: {err}");
-                sleep(Duration::from_millis(800)).await;
-                continue;
-            }
-        };
-
-        let mut buffer = String::new();
-        let mut event_data: Vec<String> = Vec::new();
-
-        loop {
-            let chunk = response.chunk().await;
-            let Some(chunk) = (match chunk {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::warn!("dev stream read error: {err}");
-                    None
-                }
-            }) else {
-                break;
-            };
-
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
-
-            while let Some(pos) = buffer.find('\n') {
-                let mut line = buffer[..pos].to_string();
-                buffer.drain(..=pos);
-
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-
-                if line.is_empty() {
-                    if !event_data.is_empty() {
-                        let payload = event_data.join("\n");
-                        event_data.clear();
-                        match serde_json::from_str::<clawhive_schema::BusMessage>(&payload) {
-                            Ok(msg) => {
-                                let _ = publisher.publish(msg).await;
-                            }
-                            Err(err) => {
-                                tracing::warn!("dev stream invalid bus payload: {err}");
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                if let Some(rest) = line.strip_prefix("data:") {
-                    event_data.push(rest.trim_start().to_string());
-                }
-            }
-        }
-
-        sleep(Duration::from_millis(300)).await;
-    }
-}
-
-async fn run_repl(
-    root: &Path,
-    _agent_id: &str,
-    security_override: Option<SecurityMode>,
-) -> Result<()> {
-    let (_bus, _memory, gateway, _config, _schedule_manager, _wait_manager, _approval_registry) =
-        bootstrap(root, security_override).await?;
-
-    println!("clawhive REPL. Type 'quit' to exit.");
-    println!("---");
-
-    let stdin = std::io::stdin();
-    loop {
-        print!("> ");
-        std::io::stdout().flush()?;
-        let mut input = String::new();
-        stdin.read_line(&mut input)?;
-        let input = input.trim();
-        if input == "quit" || input == "exit" {
-            break;
-        }
-        if input.is_empty() {
-            continue;
-        }
-
-        let inbound = InboundMessage {
-            trace_id: uuid::Uuid::new_v4(),
-            channel_type: "repl".into(),
-            connector_id: "repl".into(),
-            conversation_scope: "repl:0".into(),
-            user_scope: "user:local".into(),
-            text: input.to_string(),
-            at: chrono::Utc::now(),
-            thread_id: None,
-            is_mention: false,
-            mention_target: None,
-            message_id: None,
-            attachments: vec![],
-            group_context: None,
-        };
-
-        match gateway.handle_inbound(inbound).await {
-            Ok(out) => println!("{}", out.text),
-            Err(err) => eprintln!("Error: {err}"),
         }
     }
 

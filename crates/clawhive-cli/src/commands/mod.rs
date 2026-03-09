@@ -1,7 +1,11 @@
 pub mod agent;
 pub mod allowlist;
 pub mod auth;
+pub mod chat;
+pub mod code;
 pub mod config;
+pub mod consolidate;
+pub mod dashboard;
 pub mod logs;
 pub mod schedule;
 pub mod session;
