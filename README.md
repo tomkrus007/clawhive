@@ -19,10 +19,10 @@ curl -fsSL https://raw.githubusercontent.com/longzhi/clawhive/main/install.sh | 
 
 Auto-detects OS/architecture, downloads latest release, installs binary and skills to `~/.clawhive/`.
 
-After installation, restart your shell or run:
+After installation, run to activate in your current shell:
 
 ```bash
-source ~/.zshrc  # or ~/.bashrc
+source ~/.clawhive/env
 ```
 
 Or download manually from [GitHub Releases](https://github.com/longzhi/clawhive/releases).
