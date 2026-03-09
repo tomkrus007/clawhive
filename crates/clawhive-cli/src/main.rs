@@ -168,6 +168,8 @@ enum Commands {
         #[arg(long, short = 'y', help = "Skip confirmation prompt")]
         yes: bool,
     },
+    #[command(about = "Print shell environment setup (for eval)")]
+    Env,
     #[command(about = "Tail the latest clawhive log file")]
     Logs {
         #[arg(
@@ -416,6 +418,9 @@ async fn main() -> Result<()> {
     match command {
         Commands::Config => {
             commands::config::print_config(&cli.config_root)?;
+        }
+        Commands::Env => {
+            println!("export PATH=\"{}/bin:$PATH\"", cli.config_root.display());
         }
         Commands::Validate => {
             let config = load_config(&cli.config_root.join("config"))?;
