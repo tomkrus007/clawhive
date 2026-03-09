@@ -914,6 +914,7 @@ mod tests {
                 model_policy: super::super::ModelPolicy {
                     primary: "m".into(),
                     fallbacks: vec![],
+                    thinking_level: None,
                 },
                 tool_policy: None,
                 memory_policy: None,

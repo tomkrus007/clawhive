@@ -966,6 +966,7 @@ mod tests {
             model_policy: ModelPolicy {
                 primary: "sonnet".into(),
                 fallbacks: vec![],
+                thinking_level: None,
             },
             tool_policy: None,
             memory_policy: None,
@@ -1048,6 +1049,7 @@ mod tests {
             model_policy: ModelPolicy {
                 primary: "sonnet".into(),
                 fallbacks: vec![],
+                thinking_level: None,
             },
             tool_policy: None,
             memory_policy: None,

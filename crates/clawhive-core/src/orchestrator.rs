@@ -1046,6 +1046,7 @@ impl Orchestrator {
                 private_network_overrides,
                 source_info,
                 must_use_web_search,
+                agent.model_policy.thinking_level,
             )
             .await?;
         let reply_text = self.runtime.postprocess_output(&resp.text).await?;
@@ -1286,6 +1287,7 @@ impl Orchestrator {
                 private_network_overrides_stream,
                 source_info_stream,
                 must_use_web_search,
+                agent.model_policy.thinking_level,
             )
             .await?;
 
@@ -1308,6 +1310,7 @@ impl Orchestrator {
                 Some(system_prompt),
                 final_messages,
                 2048,
+                agent.model_policy.thinking_level,
             )
             .await?;
 
@@ -1377,6 +1380,7 @@ impl Orchestrator {
         private_network_overrides: Vec<String>,
         source_info: Option<(String, String, String, String)>, // (channel_type, connector_id, conversation_scope, user_scope)
         must_use_web_search: bool,
+        thinking_level: Option<clawhive_provider::ThinkingLevel>,
     ) -> Result<(clawhive_provider::LlmResponse, Vec<LlmMessage>)> {
         let mut messages = initial_messages;
         let tool_defs: Vec<_> = match allowed_tools {
@@ -1425,6 +1429,7 @@ impl Orchestrator {
                 messages: messages.clone(),
                 max_tokens,
                 tools: tool_defs.clone(),
+                thinking_level,
             };
 
             let llm_started = std::time::Instant::now();
@@ -1642,6 +1647,7 @@ impl Orchestrator {
             messages: messages.clone(),
             max_tokens,
             tools: vec![],
+            thinking_level,
         };
         let resp = self
             .router
@@ -1711,6 +1717,7 @@ impl Orchestrator {
                     .unwrap_or_default(),
                 source_info,
                 false,
+                agent.model_policy.thinking_level,
             )
             .await?;
 

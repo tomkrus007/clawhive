@@ -876,6 +876,7 @@ dependencies = [
  "clawhive-bus",
  "clawhive-core",
  "clawhive-gateway",
+ "clawhive-provider",
  "clawhive-scheduler",
  "clawhive-schema",
  "futures-core",

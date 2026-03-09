@@ -76,7 +76,16 @@ export interface ActionbookConfig {
 
 export interface ConnectorConfig {
   connector_id: string;
-  token: string;
+  token?: string;
+  // Feishu
+  app_id?: string;
+  app_secret?: string;
+  // DingTalk
+  client_id?: string;
+  client_secret?: string;
+  // WeCom
+  bot_id?: string;
+  secret?: string;
 }
 export interface ChannelConfig {
   enabled: boolean;
@@ -137,6 +146,13 @@ export interface CreateAgentRequest {
   name: string;
   emoji: string;
   primary_model: string;
+  thinking_level?: string;
+}
+
+export interface ListModelsRequest {
+  provider_type: string;
+  api_key?: string;
+  base_url?: string;
 }
 
 // Setup hooks
@@ -159,6 +175,16 @@ export function useCreateProvider() {
       qc.invalidateQueries({ queryKey: ["providers"] });
       qc.invalidateQueries({ queryKey: ["setup-status"] });
     },
+  });
+}
+
+export function useListModels() {
+  return useMutation({
+    mutationFn: (data: ListModelsRequest) =>
+      apiFetch<{ models: string[] }>("/api/setup/list-models", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
   });
 }
 
@@ -254,18 +280,30 @@ export function useUpdateChannels() {
 export function useAddConnector() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ kind, connectorId, token, groups, requireMention }: {
+    mutationFn: ({ kind, connectorId, token, groups, requireMention, appId, appSecret, clientId, clientSecret, botId, secret }: {
       kind: string;
       connectorId: string;
-      token: string;
+      token?: string;
       groups?: string[];
       requireMention?: boolean;
+      appId?: string;
+      appSecret?: string;
+      clientId?: string;
+      clientSecret?: string;
+      botId?: string;
+      secret?: string;
     }) =>
       apiFetch(`/api/channels/${kind}/connectors`, {
         method: "POST",
         body: JSON.stringify({
           connector_id: connectorId,
-          token,
+          ...(token ? { token } : {}),
+          ...(appId ? { app_id: appId } : {}),
+          ...(appSecret ? { app_secret: appSecret } : {}),
+          ...(clientId ? { client_id: clientId } : {}),
+          ...(clientSecret ? { client_secret: clientSecret } : {}),
+          ...(botId ? { bot_id: botId } : {}),
+          ...(secret ? { secret } : {}),
           ...(groups && groups.length > 0 ? { groups } : {}),
           ...(requireMention !== undefined ? { require_mention: requireMention } : {}),
         }),

@@ -68,6 +68,7 @@ pub use web_fetch_tool::*;
 pub use web_search_tool::*;
 pub use workspace::*;
 
+use clawhive_provider::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +76,9 @@ pub struct ModelPolicy {
     pub primary: String,
     #[serde(default)]
     pub fallbacks: Vec<String>,
+    /// Thinking / reasoning effort level. None = no extended thinking (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<ThinkingLevel>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

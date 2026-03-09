@@ -40,6 +40,11 @@ pub trait LlmProvider: Send + Sync {
     async fn health(&self) -> Result<()> {
         Ok(())
     }
+    /// List available model IDs from the provider.
+    /// Default: returns empty vec (provider doesn't support model listing).
+    async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
 }
 
 // ============================================================
@@ -432,6 +437,7 @@ mod tests {
             messages: vec![],
             max_tokens: 100,
             tools: vec![],
+            thinking_level: None,
         };
         let resp = provider.chat(req).await.unwrap();
         assert!(resp.text.contains("stub:anthropic:m"));

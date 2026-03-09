@@ -14,6 +14,7 @@ pub fn router() -> Router<AppState> {
         .route("/tools/web-search", get(get_web_search).put(put_web_search))
         .route("/tools/actionbook", get(get_actionbook).put(put_actionbook))
         .route("/provider-presets", get(get_provider_presets))
+        .route("/list-models", post(list_models_handler))
 }
 
 #[derive(Serialize)]
@@ -100,6 +101,49 @@ async fn get_provider_presets() -> Json<Vec<serde_json::Value>> {
         })
         .collect();
     Json(presets)
+}
+
+// ---------------------------------------------------------------------------
+// List models from provider API
+// ---------------------------------------------------------------------------
+#[derive(Deserialize)]
+struct ListModelsRequest {
+    provider_type: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ListModelsResponse {
+    models: Vec<String>,
+}
+
+async fn list_models_handler(
+    Json(req): Json<ListModelsRequest>,
+) -> Result<Json<ListModelsResponse>, axum::http::StatusCode> {
+    let provider_type: clawhive_provider::ProviderType =
+        serde_json::from_value(serde_json::Value::String(req.provider_type))
+            .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+
+    let mut config = clawhive_provider::ProviderConfig::new("temp", provider_type);
+    if let Some(key) = req.api_key {
+        config = config.with_api_key(key);
+    }
+    if let Some(url) = req.base_url {
+        config = config.with_base_url(url);
+    }
+
+    let provider = clawhive_provider::create_provider(&config)
+        .map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+
+    let models = provider.list_models().await.map_err(|e| {
+        tracing::warn!("list_models failed: {e}");
+        axum::http::StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Json(ListModelsResponse { models }))
 }
 
 // ---------------------------------------------------------------------------

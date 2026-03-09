@@ -43,6 +43,7 @@ fn test_full_agent() -> FullAgentConfig {
         model_policy: ModelPolicy {
             primary: "stub".to_string(),
             fallbacks: vec![],
+            thinking_level: None,
         },
         tool_policy: None,
         memory_policy: None,
