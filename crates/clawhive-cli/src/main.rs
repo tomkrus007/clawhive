@@ -1792,7 +1792,7 @@ fn ensure_skeleton_config(root: &Path, port: u16) -> Result<()> {
     // config/main.yaml — channels disabled
     std::fs::write(
         &main_yaml,
-        "app:\n  name: clawhive\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n  telegram:\n    enabled: false\n    connectors: []\n  discord:\n    enabled: false\n    connectors: []\n\nembedding:\n  enabled: true\n  provider: auto\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
+        "app:\n  name: clawhive\n\nruntime:\n  max_concurrent: 4\n\nfeatures:\n  multi_agent: true\n  sub_agent: true\n  tui: true\n  cli: true\n\nchannels:\n  telegram:\n    enabled: false\n    connectors: []\n  discord:\n    enabled: false\n    connectors: []\n  feishu:\n    enabled: false\n    connectors: []\n  dingtalk:\n    enabled: false\n    connectors: []\n  wecom:\n    enabled: false\n    connectors: []\n\nembedding:\n  enabled: true\n  provider: auto\n  api_key: \"\"\n  model: text-embedding-3-small\n  dimensions: 1536\n  base_url: https://api.openai.com/v1\n\ntools: {}\n",
     )?;
 
     // config/routing.yaml

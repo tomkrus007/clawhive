@@ -242,6 +242,8 @@ impl WeComBot {
             "wecom AI Bot subscribed successfully"
         );
 
+        // TODO: Consider replacing Arc<Mutex<WsSink>> with a bounded MPSC channel
+        // and a dedicated writer task to avoid potential lock contention under load.
         let write = Arc::new(tokio::sync::Mutex::new(write));
 
         Self::spawn_delivery_listener(self.bus.clone(), write.clone(), self.connector_id.clone());
@@ -265,6 +267,8 @@ impl WeComBot {
             }
         });
 
+        // TODO: Improve dedup — currently clears entire HashSet at 10k entries.
+        // Consider LRU cache or time-based expiry for more predictable behavior.
         let mut seen_msgs: HashSet<String> = HashSet::new();
 
         while let Some(msg) = read.next().await {
@@ -377,7 +381,7 @@ impl WeComBot {
 
     fn spawn_delivery_listener(
         bus: Arc<EventBus>,
-        write: Arc<tokio::sync::Mutex<WsSink>>,
+        _write: Arc<tokio::sync::Mutex<WsSink>>,
         connector_id: String,
     ) {
         tokio::spawn(async move {
@@ -386,8 +390,8 @@ impl WeComBot {
                 let BusMessage::DeliverAnnounce {
                     channel_type,
                     connector_id: msg_connector_id,
-                    conversation_scope,
-                    text,
+                    conversation_scope: _,
+                    text: _,
                 } = msg
                 else {
                     continue;
@@ -397,29 +401,15 @@ impl WeComBot {
                     continue;
                 }
 
-                let req_id = Uuid::new_v4().to_string();
-                let msgid = conversation_scope;
-                let reply = WeComReplyMessage::text(&req_id, &msgid, &text, true);
-                match serde_json::to_string(&reply) {
-                    Ok(json) => {
-                        let mut w = write.lock().await;
-                        if let Err(e) = w.send(WsMessage::Text(json.into())).await {
-                            tracing::error!(
-                                target: "clawhive::channel::wecom",
-                                error = %e,
-                                "failed to deliver announce message"
-                            );
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            target: "clawhive::channel::wecom",
-                            error = %e,
-                            "failed to serialize announce message"
-                        );
-                    }
-                }
+                // WeCom AI Bot WebSocket mode only supports request-response.
+                // The `aibot_respond_msg` command requires a real incoming msgid,
+                // so proactive/scheduled message delivery is not possible via
+                // this protocol. Log and skip.
+                tracing::warn!(
+                    target: "clawhive::channel::wecom",
+                    "WeCom AI Bot mode does not support proactive message delivery; \
+                     scheduled task result dropped"
+                );
             }
         });
     }

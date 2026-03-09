@@ -669,6 +669,30 @@ fn resolve_main_env(main: &mut MainConfig) {
         }
     }
 
+    if let Some(feishu) = &mut main.channels.feishu {
+        for connector in &mut feishu.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.app_id = resolve_env_var(&connector.app_id);
+            connector.app_secret = resolve_env_var(&connector.app_secret);
+        }
+    }
+
+    if let Some(dingtalk) = &mut main.channels.dingtalk {
+        for connector in &mut dingtalk.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.client_id = resolve_env_var(&connector.client_id);
+            connector.client_secret = resolve_env_var(&connector.client_secret);
+        }
+    }
+
+    if let Some(wecom) = &mut main.channels.wecom {
+        for connector in &mut wecom.connectors {
+            connector.connector_id = resolve_env_var(&connector.connector_id);
+            connector.bot_id = resolve_env_var(&connector.bot_id);
+            connector.secret = resolve_env_var(&connector.secret);
+        }
+    }
+
     main.embedding.api_key = resolve_env_var(&main.embedding.api_key);
     main.embedding.base_url = resolve_env_var(&main.embedding.base_url);
     main.embedding.model = resolve_env_var(&main.embedding.model);

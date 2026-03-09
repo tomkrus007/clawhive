@@ -150,6 +150,8 @@ impl DingTalkClient {
         Ok(resp)
     }
 
+    // TODO: Store session_webhook_expired_time alongside webhook and check before use.
+    // Expired webhooks will cause silent reply failures. Consider fallback delivery.
     pub async fn cache_session_webhook(&self, conversation_id: &str, webhook: &str) {
         let mut map = self.session_webhooks.write().await;
         map.insert(conversation_id.to_string(), webhook.to_string());
