@@ -33,8 +33,9 @@ use clawhive_memory::embedding::{
 use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
 use clawhive_provider::{
-    register_builtin_providers, AnthropicProvider, AzureOpenAiProvider, OpenAiChatGptProvider,
-    OpenAiProvider, ProviderRegistry,
+    minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
+    AnthropicProvider, AzureOpenAiProvider, OpenAiChatGptProvider, OpenAiProvider,
+    ProviderRegistry,
 };
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{ScheduleManager, ScheduleType, SqliteStore, WaitTask, WaitTaskManager};
@@ -1495,6 +1496,60 @@ fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
                     registry.register("azure-openai", provider);
                 } else {
                     tracing::warn!("Azure OpenAI: no API key set, skipping");
+                }
+            }
+            "qwen" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(qwen(api_key));
+                    registry.register("qwen", provider);
+                } else {
+                    tracing::warn!("Qwen: no API key set, skipping");
+                }
+            }
+            "moonshot" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(moonshot(api_key));
+                    registry.register("moonshot", provider);
+                } else {
+                    tracing::warn!("Moonshot: no API key set, skipping");
+                }
+            }
+            "zhipu" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(zhipu(api_key));
+                    registry.register("zhipu", provider);
+                } else {
+                    tracing::warn!("Zhipu: no API key set, skipping");
+                }
+            }
+            "minimax" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(minimax(api_key));
+                    registry.register("minimax", provider);
+                } else {
+                    tracing::warn!("MiniMax: no API key set, skipping");
+                }
+            }
+            "volcengine" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(volcengine(api_key));
+                    registry.register("volcengine", provider);
+                } else {
+                    tracing::warn!("Volcengine: no API key set, skipping");
+                }
+            }
+            "qianfan" => {
+                let api_key = provider_config.api_key.clone().filter(|k| !k.is_empty());
+                if let Some(api_key) = api_key {
+                    let provider = Arc::new(qianfan(api_key));
+                    registry.register("qianfan", provider);
+                } else {
+                    tracing::warn!("Qianfan: no API key set, skipping");
                 }
             }
             _ => {
