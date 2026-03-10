@@ -54,6 +54,7 @@ impl MemoryFileStore {
 
         let mut file = fs::OpenOptions::new().append(true).open(path).await?;
         file.write_all(format!("\n{content}\n").as_bytes()).await?;
+        file.flush().await?;
         Ok(())
     }
 
