@@ -389,7 +389,7 @@ impl ScheduleManager {
         let mut entries = self.entries.write().await;
 
         for entry in entries.values_mut() {
-            const STUCK_RUN_MS: i64 = 2 * 60 * 60 * 1000;
+            const STUCK_RUN_MS: i64 = 10 * 60 * 1000; // 10 minutes
             if let Some(running_at) = entry.state.running_at_ms {
                 if now_ms - running_at > STUCK_RUN_MS {
                     tracing::warn!(
