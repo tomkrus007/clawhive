@@ -82,6 +82,61 @@ pub async fn wait_for_oauth_callback(
     callback
 }
 
+pub fn parse_oauth_callback_input(input: &str, expected_state: &str) -> Result<OAuthCallback> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!(
+            "empty callback input; paste the full redirected URL or code=...&state=..."
+        ));
+    }
+
+    let query = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        let url = reqwest::Url::parse(trimmed).context("failed to parse pasted callback URL")?;
+        CallbackQuery {
+            code: url
+                .query_pairs()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.into_owned()),
+            state: url
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.into_owned()),
+            error: url
+                .query_pairs()
+                .find(|(k, _)| k == "error")
+                .map(|(_, v)| v.into_owned()),
+            error_description: url
+                .query_pairs()
+                .find(|(k, _)| k == "error_description")
+                .map(|(_, v)| v.into_owned()),
+        }
+    } else {
+        let query = trimmed.trim_start_matches('?');
+        let url = reqwest::Url::parse(&format!("http://localhost/auth/callback?{query}"))
+            .context("failed to parse pasted callback query")?;
+        CallbackQuery {
+            code: url
+                .query_pairs()
+                .find(|(k, _)| k == "code")
+                .map(|(_, v)| v.into_owned()),
+            state: url
+                .query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.into_owned()),
+            error: url
+                .query_pairs()
+                .find(|(k, _)| k == "error")
+                .map(|(_, v)| v.into_owned()),
+            error_description: url
+                .query_pairs()
+                .find(|(k, _)| k == "error_description")
+                .map(|(_, v)| v.into_owned()),
+        }
+    };
+
+    validate_callback(query, expected_state).map_err(|(_, message)| anyhow!(message))
+}
+
 async fn handle_callback(
     State(state): State<CallbackState>,
     Query(query): Query<CallbackQuery>,
@@ -138,7 +193,7 @@ fn validate_callback(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_callback, CallbackQuery};
+    use super::{parse_oauth_callback_input, validate_callback, CallbackQuery};
     use axum::http::StatusCode;
 
     #[test]
@@ -166,5 +221,34 @@ mod tests {
 
         let err = validate_callback(query, "state-abc").expect_err("state mismatch should fail");
         assert_eq!(err.0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn parse_oauth_callback_input_accepts_full_url() {
+        let callback = parse_oauth_callback_input(
+            "http://localhost:1455/auth/callback?code=code-123&state=state-abc",
+            "state-abc",
+        )
+        .expect("full URL should parse");
+
+        assert_eq!(callback.code, "code-123");
+        assert_eq!(callback.state, "state-abc");
+    }
+
+    #[test]
+    fn parse_oauth_callback_input_accepts_query_string() {
+        let callback = parse_oauth_callback_input("code=code-123&state=state-abc", "state-abc")
+            .expect("query string should parse");
+
+        assert_eq!(callback.code, "code-123");
+        assert_eq!(callback.state, "state-abc");
+    }
+
+    #[test]
+    fn parse_oauth_callback_input_rejects_missing_state() {
+        let err = parse_oauth_callback_input("code=code-123", "state-abc")
+            .expect_err("missing state should fail");
+
+        assert!(err.to_string().contains("missing OAuth state"));
     }
 }

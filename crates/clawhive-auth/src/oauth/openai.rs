@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -6,10 +7,11 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::server::wait_for_oauth_callback;
+use super::server::{parse_oauth_callback_input, wait_for_oauth_callback};
 
 /// Default OAuth scope required by OpenAI's authorize endpoint.
 pub const OPENAI_OAUTH_SCOPE: &str = "openid profile email offline_access";
+pub const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkcePair {
@@ -101,6 +103,27 @@ pub fn open_authorize_url(url: &str) -> Result<()> {
         .with_context(|| format!("failed to open browser for {url}"))
 }
 
+fn prompt_for_manual_callback(authorize_url: &str, expected_state: &str) -> Result<String> {
+    eprintln!();
+    eprintln!("Open this URL on any computer with a browser:");
+    eprintln!("{authorize_url}");
+    eprintln!();
+    eprintln!("After approving access, the browser will redirect to a localhost callback URL.");
+    eprintln!("That page may fail to load on the browser machine. Copy the full redirected URL");
+    eprintln!("from the address bar and paste it here. A raw query string like");
+    eprintln!("`code=...&state=...` also works.");
+    eprintln!();
+    eprint!("Paste callback URL or query: ");
+    io::stderr().flush().ok();
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("failed to read pasted OAuth callback")?;
+
+    Ok(parse_oauth_callback_input(&input, expected_state)?.code)
+}
+
 pub async fn run_openai_pkce_flow(
     http: &reqwest::Client,
     config: &OpenAiOAuthConfig,
@@ -109,17 +132,28 @@ pub async fn run_openai_pkce_flow(
     let state = uuid::Uuid::new_v4().to_string();
 
     let authorize_url = build_authorize_url(config, &pkce.challenge, &state);
-
-    open_authorize_url(&authorize_url)?;
-
-    let callback = wait_for_oauth_callback(state, Duration::from_secs(300)).await?;
+    let code = match open_authorize_url(&authorize_url) {
+        Ok(()) => match wait_for_oauth_callback(state.clone(), Duration::from_secs(300)).await {
+            Ok(callback) => callback.code,
+            Err(wait_err) => {
+                eprintln!();
+                eprintln!("Automatic OAuth callback failed: {wait_err}");
+                prompt_for_manual_callback(&authorize_url, &state)?
+            }
+        },
+        Err(open_err) => {
+            eprintln!();
+            eprintln!("Could not open a browser automatically: {open_err}");
+            prompt_for_manual_callback(&authorize_url, &state)?
+        }
+    };
 
     exchange_code_for_tokens(
         http,
         &config.token_endpoint,
         &config.client_id,
         &config.redirect_uri,
-        &callback.code,
+        &code,
         &pkce.verifier,
     )
     .await

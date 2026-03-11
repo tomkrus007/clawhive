@@ -23,11 +23,21 @@ impl OpenAiChatGptProvider {
         chatgpt_account_id: Option<String>,
         api_base: impl Into<String>,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default();
+        Self::with_client(client, access_token, chatgpt_account_id, api_base)
+    }
+
+    pub fn with_client(
+        client: reqwest::Client,
+        access_token: impl Into<String>,
+        chatgpt_account_id: Option<String>,
+        api_base: impl Into<String>,
+    ) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            client,
             access_token: access_token.into(),
             chatgpt_account_id,
             api_base: api_base.into().trim_end_matches('/').to_string(),

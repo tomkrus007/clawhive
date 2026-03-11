@@ -1,10 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 
-use clawhive_auth::{AuthProfile, TokenManager};
+use clawhive_auth::{
+    manager::OpenAiRefreshConfig,
+    oauth::{OpenAiOAuthConfig, OPENAI_OAUTH_CLIENT_ID},
+    AuthProfile, TokenManager,
+};
 use clawhive_bus::EventBus;
 use clawhive_core::*;
 use clawhive_gateway::{Gateway, RateLimitConfig, RateLimiter};
@@ -16,11 +23,12 @@ use clawhive_memory::search_index::SearchIndex;
 use clawhive_memory::MemoryStore;
 use clawhive_provider::{
     minimax, moonshot, qianfan, qwen, register_builtin_providers, volcengine, zhipu,
-    AnthropicProvider, AzureOpenAiProvider, OpenAiChatGptProvider, OpenAiProvider,
-    ProviderRegistry,
+    AnthropicProvider, AzureOpenAiProvider, LlmProvider, LlmRequest, LlmResponse,
+    OpenAiChatGptProvider, OpenAiProvider, ProviderRegistry, StreamChunk,
 };
 use clawhive_runtime::NativeExecutor;
 use clawhive_scheduler::{ScheduleManager, ScheduleType, SqliteStore, WaitTaskManager};
+use futures_core::Stream;
 
 pub(crate) fn toggle_agent(
     agents_dir: &std::path::Path,
@@ -69,6 +77,253 @@ pub(crate) fn resolve_security_override(
     }
 }
 
+#[derive(Debug, Clone)]
+enum OpenAiProfileTarget {
+    Named(String),
+    Active,
+}
+
+impl OpenAiProfileTarget {
+    fn from_provider_config(provider_config: &ProviderConfig) -> Self {
+        provider_config
+            .auth_profile
+            .clone()
+            .map(Self::Named)
+            .unwrap_or(Self::Active)
+    }
+
+    fn resolve_profile_name(&self, token_manager: &TokenManager) -> Result<Option<String>> {
+        match self {
+            Self::Named(name) => Ok(Some(name.clone())),
+            Self::Active => Ok(token_manager.load_store()?.active_profile),
+        }
+    }
+}
+
+fn default_openai_refresh_config() -> OpenAiRefreshConfig {
+    let oauth_config = OpenAiOAuthConfig::default_with_client(OPENAI_OAUTH_CLIENT_ID);
+    OpenAiRefreshConfig {
+        token_endpoint: oauth_config.token_endpoint,
+        client_id: oauth_config.client_id,
+    }
+}
+
+fn build_http_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .unwrap_or_default()
+}
+
+#[derive(Clone)]
+struct RefreshingOpenAiProvider {
+    client: reqwest::Client,
+    token_manager: TokenManager,
+    profile_target: OpenAiProfileTarget,
+    api_key: String,
+    api_base: String,
+    refresh_config: OpenAiRefreshConfig,
+}
+
+impl RefreshingOpenAiProvider {
+    fn new(
+        token_manager: TokenManager,
+        profile_target: OpenAiProfileTarget,
+        api_key: String,
+        api_base: String,
+    ) -> Self {
+        Self {
+            client: build_http_client(60),
+            token_manager,
+            profile_target,
+            api_key,
+            api_base,
+            refresh_config: default_openai_refresh_config(),
+        }
+    }
+
+    async fn load_auth_profile(&self) -> Option<AuthProfile> {
+        let profile_name = match self
+            .profile_target
+            .resolve_profile_name(&self.token_manager)
+        {
+            Ok(profile_name) => profile_name,
+            Err(err) => {
+                tracing::warn!("Failed to resolve OpenAI auth profile: {err}");
+                return None;
+            }
+        }?;
+
+        let profile = match self.token_manager.get_profile(&profile_name) {
+            Ok(Some(profile)) => profile,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(
+                    profile = %profile_name,
+                    "Failed to load OpenAI auth profile: {err}"
+                );
+                return None;
+            }
+        };
+
+        match profile {
+            AuthProfile::OpenAiOAuth { .. } => match self
+                .token_manager
+                .refresh_if_needed(&self.client, &profile_name, &self.refresh_config)
+                .await
+            {
+                Ok(Some(profile)) => Some(profile),
+                Ok(None) => Some(profile),
+                Err(err) => {
+                    tracing::warn!(
+                        profile = %profile_name,
+                        "Failed to refresh OpenAI OAuth token before request: {err}"
+                    );
+                    Some(profile)
+                }
+            },
+            AuthProfile::ApiKey {
+                ref provider_id, ..
+            } if provider_id == "openai" => Some(profile),
+            _ => None,
+        }
+    }
+
+    async fn build_inner(&self) -> OpenAiProvider {
+        OpenAiProvider::with_client(
+            self.client.clone(),
+            self.api_key.clone(),
+            self.api_base.clone(),
+            self.load_auth_profile().await,
+        )
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RefreshingOpenAiProvider {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+        self.build_inner().await.chat(request).await
+    }
+
+    async fn stream(
+        &self,
+        request: LlmRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        self.build_inner().await.stream(request).await
+    }
+
+    async fn health(&self) -> Result<()> {
+        self.build_inner().await.health().await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        self.build_inner().await.list_models().await
+    }
+}
+
+#[derive(Clone)]
+struct RefreshingOpenAiChatGptProvider {
+    client: reqwest::Client,
+    token_manager: TokenManager,
+    profile_target: OpenAiProfileTarget,
+    api_base: String,
+    refresh_config: OpenAiRefreshConfig,
+}
+
+impl RefreshingOpenAiChatGptProvider {
+    fn new(
+        token_manager: TokenManager,
+        profile_target: OpenAiProfileTarget,
+        api_base: String,
+    ) -> Self {
+        Self {
+            client: build_http_client(120),
+            token_manager,
+            profile_target,
+            api_base,
+            refresh_config: default_openai_refresh_config(),
+        }
+    }
+
+    async fn load_oauth_profile(&self) -> Result<(String, Option<String>)> {
+        let profile_name = self
+            .profile_target
+            .resolve_profile_name(&self.token_manager)?
+            .ok_or_else(|| anyhow!("openai-chatgpt: no OAuth profile found"))?;
+
+        let profile = self
+            .token_manager
+            .get_profile(&profile_name)?
+            .ok_or_else(|| anyhow!("openai-chatgpt: auth profile '{profile_name}' not found"))?;
+
+        let profile = match profile {
+            AuthProfile::OpenAiOAuth { .. } => match self
+                .token_manager
+                .refresh_if_needed(&self.client, &profile_name, &self.refresh_config)
+                .await
+            {
+                Ok(Some(profile)) => profile,
+                Ok(None) => profile,
+                Err(err) => {
+                    tracing::warn!(
+                        profile = %profile_name,
+                        "Failed to refresh OpenAI OAuth token before request: {err}"
+                    );
+                    profile
+                }
+            },
+            _ => {
+                return Err(anyhow!(
+                    "openai-chatgpt: auth profile '{profile_name}' is not OpenAI OAuth"
+                ));
+            }
+        };
+
+        match profile {
+            AuthProfile::OpenAiOAuth {
+                access_token,
+                chatgpt_account_id,
+                ..
+            } => Ok((access_token, chatgpt_account_id)),
+            _ => Err(anyhow!(
+                "openai-chatgpt: auth profile '{profile_name}' is not OpenAI OAuth"
+            )),
+        }
+    }
+
+    async fn build_inner(&self) -> Result<OpenAiChatGptProvider> {
+        let (access_token, chatgpt_account_id) = self.load_oauth_profile().await?;
+        Ok(OpenAiChatGptProvider::with_client(
+            self.client.clone(),
+            access_token,
+            chatgpt_account_id,
+            self.api_base.clone(),
+        ))
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RefreshingOpenAiChatGptProvider {
+    async fn chat(&self, request: LlmRequest) -> Result<LlmResponse> {
+        self.build_inner().await?.chat(request).await
+    }
+
+    async fn stream(
+        &self,
+        request: LlmRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        self.build_inner().await?.stream(request).await
+    }
+
+    async fn health(&self) -> Result<()> {
+        self.build_inner().await?.health().await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        self.build_inner().await?.list_models().await
+    }
+}
+
 #[allow(clippy::type_complexity)]
 pub(crate) async fn bootstrap(
     root: &Path,
@@ -106,7 +361,7 @@ pub(crate) async fn bootstrap(
         db_path.to_str().unwrap_or("data/clawhive.db"),
     )?);
 
-    let router = build_router_from_config(&config);
+    let router = build_router_from_config(&config).await;
 
     // Initialize peer registry by scanning workspaces
     let workspaces_root = root.join("workspaces");
@@ -245,11 +500,108 @@ pub(crate) async fn bootstrap(
     ))
 }
 
-pub(crate) fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
-    let token_manager = TokenManager::new().ok();
-    let active_profile = token_manager
+fn collect_openai_oauth_refresh_targets(
+    config: &ClawhiveConfig,
+    active_profile_name: Option<&str>,
+) -> HashSet<String> {
+    let mut targets = HashSet::new();
+
+    for provider_config in &config.providers {
+        if !provider_config.enabled {
+            continue;
+        }
+
+        if !matches!(
+            provider_config.provider_id.as_str(),
+            "openai" | "openai-chatgpt"
+        ) {
+            continue;
+        }
+
+        if let Some(profile_name) = provider_config
+            .auth_profile
+            .as_deref()
+            .or(active_profile_name)
+        {
+            targets.insert(profile_name.to_string());
+        }
+    }
+
+    targets
+}
+
+async fn refresh_required_openai_oauth_profiles(
+    config: &ClawhiveConfig,
+    token_manager: &TokenManager,
+) {
+    let store = match token_manager.load_store() {
+        Ok(store) => store,
+        Err(err) => {
+            tracing::warn!("Failed to load auth profiles before OAuth refresh: {err}");
+            return;
+        }
+    };
+
+    let targets = collect_openai_oauth_refresh_targets(config, store.active_profile.as_deref());
+    if targets.is_empty() {
+        return;
+    }
+
+    let refresh_config = default_openai_refresh_config();
+    let http = build_http_client(60);
+
+    for profile_name in targets {
+        if !matches!(
+            store.profiles.get(&profile_name),
+            Some(AuthProfile::OpenAiOAuth { .. })
+        ) {
+            continue;
+        }
+
+        match token_manager
+            .refresh_if_needed(&http, &profile_name, &refresh_config)
+            .await
+        {
+            Ok(Some(_)) => {
+                tracing::info!(profile = %profile_name, "Refreshed OpenAI OAuth token");
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(
+                    profile = %profile_name,
+                    "Failed to refresh OpenAI OAuth token: {err}"
+                );
+            }
+        }
+    }
+}
+
+pub(crate) async fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
+    let token_manager = match TokenManager::new() {
+        Ok(manager) => {
+            refresh_required_openai_oauth_profiles(config, &manager).await;
+            Some(manager)
+        }
+        Err(err) => {
+            tracing::warn!("Failed to initialize auth token manager: {err}");
+            None
+        }
+    };
+    let auth_store = token_manager
         .as_ref()
-        .and_then(|m| m.get_active_profile().ok().flatten());
+        .and_then(|manager| match manager.load_store() {
+            Ok(store) => Some(store),
+            Err(err) => {
+                tracing::warn!("Failed to load auth profiles: {err}");
+                None
+            }
+        });
+    let active_profile = auth_store.as_ref().and_then(|store| {
+        store
+            .active_profile
+            .as_ref()
+            .and_then(|name| store.profiles.get(name).cloned())
+    });
 
     let anthropic_profile = active_profile.as_ref().and_then(|p| match p {
         AuthProfile::AnthropicSession { .. } => Some(p.clone()),
@@ -265,10 +617,11 @@ pub(crate) fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
 
         // Resolve OAuth profile: named auth_profile takes priority, then fallback to active_profile
         let named_profile = provider_config.auth_profile.as_ref().and_then(|name| {
-            token_manager
+            auth_store
                 .as_ref()
-                .and_then(|m| m.get_profile(name).ok().flatten())
+                .and_then(|store| store.profiles.get(name).cloned())
         });
+        let profile_target = OpenAiProfileTarget::from_provider_config(provider_config);
 
         match provider_config.provider_id.as_str() {
             "anthropic" => {
@@ -306,11 +659,28 @@ pub(crate) fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
 
                 if !api_key.is_empty() {
                     // Standard API key path — use chat/completions
-                    let provider = Arc::new(OpenAiProvider::new_with_auth(
-                        api_key,
-                        provider_config.api_base.clone(),
-                        oauth_profile,
-                    ));
+                    let provider: Arc<dyn LlmProvider> =
+                        if matches!(oauth_profile, Some(AuthProfile::OpenAiOAuth { .. })) {
+                            match token_manager.clone() {
+                                Some(token_manager) => Arc::new(RefreshingOpenAiProvider::new(
+                                    token_manager,
+                                    profile_target.clone(),
+                                    api_key.clone(),
+                                    provider_config.api_base.clone(),
+                                )),
+                                None => Arc::new(OpenAiProvider::new_with_auth(
+                                    api_key.clone(),
+                                    provider_config.api_base.clone(),
+                                    oauth_profile,
+                                )),
+                            }
+                        } else {
+                            Arc::new(OpenAiProvider::new_with_auth(
+                                api_key.clone(),
+                                provider_config.api_base.clone(),
+                                oauth_profile,
+                            ))
+                        };
                     registry.register("openai", provider);
                 } else if let Some(AuthProfile::OpenAiOAuth {
                     access_token,
@@ -319,11 +689,18 @@ pub(crate) fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
                 }) = &oauth_profile
                 {
                     // Backward compat: openai config with no api_key but has OAuth → ChatGPT provider
-                    let provider = Arc::new(OpenAiChatGptProvider::new(
-                        access_token.clone(),
-                        chatgpt_account_id.clone(),
-                        provider_config.api_base.clone(),
-                    ));
+                    let provider: Arc<dyn LlmProvider> = match token_manager.clone() {
+                        Some(token_manager) => Arc::new(RefreshingOpenAiChatGptProvider::new(
+                            token_manager,
+                            profile_target.clone(),
+                            provider_config.api_base.clone(),
+                        )),
+                        None => Arc::new(OpenAiChatGptProvider::new(
+                            access_token.clone(),
+                            chatgpt_account_id.clone(),
+                            provider_config.api_base.clone(),
+                        )),
+                    };
                     registry.register("openai", provider);
                     tracing::info!(
                         "OpenAI registered via ChatGPT OAuth (account: {:?})",
@@ -348,11 +725,18 @@ pub(crate) fn build_router_from_config(config: &ClawhiveConfig) -> LlmRouter {
                     ..
                 }) = &oauth_profile
                 {
-                    let provider = Arc::new(OpenAiChatGptProvider::new(
-                        access_token.clone(),
-                        chatgpt_account_id.clone(),
-                        provider_config.api_base.clone(),
-                    ));
+                    let provider: Arc<dyn LlmProvider> = match token_manager.clone() {
+                        Some(token_manager) => Arc::new(RefreshingOpenAiChatGptProvider::new(
+                            token_manager,
+                            profile_target.clone(),
+                            provider_config.api_base.clone(),
+                        )),
+                        None => Arc::new(OpenAiChatGptProvider::new(
+                            access_token.clone(),
+                            chatgpt_account_id.clone(),
+                            provider_config.api_base.clone(),
+                        )),
+                    };
                     registry.register("openai-chatgpt", provider);
                     tracing::info!(
                         "openai-chatgpt registered via OAuth (account: {:?})",
@@ -643,4 +1027,62 @@ pub(crate) async fn build_embedding_provider(
     // BM25 keyword search will handle memory_search as fallback
     tracing::warn!("No embedding provider available, memory_search will use keyword matching only");
     Arc::new(StubEmbeddingProvider::new(8))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_openai_oauth_refresh_targets;
+    use clawhive_core::{ClawhiveConfig, MainConfig, ProviderConfig, RoutingConfig};
+
+    #[test]
+    fn collect_openai_oauth_refresh_targets_uses_named_or_active_profiles() {
+        let config = ClawhiveConfig {
+            main: MainConfig::default(),
+            routing: RoutingConfig {
+                default_agent_id: String::new(),
+                bindings: Vec::new(),
+            },
+            providers: vec![
+                ProviderConfig {
+                    provider_id: "openai".to_string(),
+                    enabled: true,
+                    api_base: "https://api.openai.com/v1".to_string(),
+                    api_key: None,
+                    auth_profile: Some("named-openai".to_string()),
+                    models: Vec::new(),
+                },
+                ProviderConfig {
+                    provider_id: "openai-chatgpt".to_string(),
+                    enabled: true,
+                    api_base: "https://chatgpt.com/backend-api/codex".to_string(),
+                    api_key: None,
+                    auth_profile: None,
+                    models: Vec::new(),
+                },
+                ProviderConfig {
+                    provider_id: "anthropic".to_string(),
+                    enabled: true,
+                    api_base: "https://api.anthropic.com".to_string(),
+                    api_key: None,
+                    auth_profile: Some("anthropic-session".to_string()),
+                    models: Vec::new(),
+                },
+                ProviderConfig {
+                    provider_id: "openai".to_string(),
+                    enabled: false,
+                    api_base: "https://api.openai.com/v1".to_string(),
+                    api_key: None,
+                    auth_profile: Some("disabled-openai".to_string()),
+                    models: Vec::new(),
+                },
+            ],
+            agents: Vec::new(),
+        };
+
+        let targets = collect_openai_oauth_refresh_targets(&config, Some("active-openai"));
+
+        assert_eq!(targets.len(), 2);
+        assert!(targets.contains("named-openai"));
+        assert!(targets.contains("active-openai"));
+    }
 }
