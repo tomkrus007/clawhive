@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 
+use crate::oauth::extract_chatgpt_account_id;
 use crate::profile::{AuthProfile, AuthStore};
 
 const AUTH_STORE_FILE: &str = "auth-profiles.json";
@@ -121,14 +122,20 @@ impl TokenManager {
         let _guard = lock.write()?;
 
         let mut store = self.load_store()?;
-        let (refresh_token, should_refresh) = match store.profiles.get(profile_name) {
+        let (refresh_token, should_refresh, chatgpt_account_id) =
+            match store.profiles.get(profile_name) {
             Some(AuthProfile::OpenAiOAuth {
                 refresh_token,
                 expires_at,
+                chatgpt_account_id,
                 ..
             }) => {
                 let deadline = now_unix_ts()? + Duration::from_secs(300).as_secs() as i64;
-                (refresh_token.clone(), *expires_at <= deadline)
+                (
+                    refresh_token.clone(),
+                    *expires_at <= deadline,
+                    chatgpt_account_id.clone(),
+                )
             }
             _ => return Ok(None),
         };
@@ -165,11 +172,12 @@ impl TokenManager {
             .await
             .context("invalid OpenAI refresh response payload")?;
 
+        let access_token = body.access_token;
         let new_profile = AuthProfile::OpenAiOAuth {
-            access_token: body.access_token,
+            chatgpt_account_id: extract_chatgpt_account_id(&access_token).or(chatgpt_account_id),
+            access_token,
             refresh_token: body.refresh_token.unwrap_or(refresh_token),
             expires_at: now_unix_ts()? + body.expires_in,
-            chatgpt_account_id: None,
         };
 
         store
@@ -274,6 +282,56 @@ mod tests {
             updated,
             Some(AuthProfile::OpenAiOAuth { access_token, refresh_token, .. })
                 if access_token == "new-at" && refresh_token == "new-rt"
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_if_needed_preserves_chatgpt_account_id() {
+        let temp = tempfile::tempdir().expect("create temp dir");
+        let manager = TokenManager::from_config_dir(temp.path());
+
+        manager
+            .save_profile(
+                "openai-main",
+                AuthProfile::OpenAiOAuth {
+                    access_token: "old-at".to_string(),
+                    refresh_token: "old-rt".to_string(),
+                    expires_at: 0,
+                    chatgpt_account_id: Some("acct_123".to_string()),
+                },
+            )
+            .expect("save profile");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new-at",
+                "refresh_token": "new-rt",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let updated = manager
+            .refresh_if_needed(
+                &http,
+                "openai-main",
+                &OpenAiRefreshConfig {
+                    token_endpoint: format!("{}/oauth/token", server.uri()),
+                    client_id: "client-123".to_string(),
+                },
+            )
+            .await
+            .expect("refresh should not error");
+
+        assert!(matches!(
+            updated,
+            Some(AuthProfile::OpenAiOAuth {
+                chatgpt_account_id,
+                ..
+            }) if chatgpt_account_id.as_deref() == Some("acct_123")
         ));
     }
 }

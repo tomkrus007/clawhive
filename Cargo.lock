@@ -687,6 +687,7 @@ name = "clawhive-cli"
 version = "0.1.0-alpha.24"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bcrypt",
  "chrono",
  "clap",
@@ -705,6 +706,7 @@ dependencies = [
  "console",
  "dialoguer",
  "flate2",
+ "futures-core",
  "libc",
  "openssl",
  "reqwest 0.12.28",

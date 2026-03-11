@@ -3,19 +3,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clawhive_auth::oauth::{
-    extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow,
-    validate_setup_token, OpenAiOAuthConfig,
+    OpenAiOAuthConfig, extract_chatgpt_account_id, profile_from_setup_token, run_openai_pkce_flow,
+    validate_setup_token,
 };
 use clawhive_auth::{AuthProfile, TokenManager};
 use console::Term;
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 
 use super::config_io::{
     display_rel, input_or_back, input_or_back_with_default, mask_secret, unix_timestamp,
 };
 use super::scan::ConfigState;
-use super::ui::print_done;
 use super::ui::ARROW;
+use super::ui::print_done;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProviderId {
@@ -285,15 +285,21 @@ fn prompt_api_key(theme: &ColorfulTheme, provider: ProviderId) -> Result<Option<
 
 async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
     let manager = TokenManager::new()?;
-    let profile_name = format!("{}-{}", provider.as_str(), unix_timestamp()?);
+    let profile_name = oauth_profile_name(provider)?;
 
     match provider {
         ProviderId::OpenAi => {
             let term = Term::stdout();
             let _ = term.write_line("");
-            let _ = term.write_line("  Opening browser for OpenAI OAuth login...");
-            let _ = term.write_line("  Complete the login in your browser.");
-            let _ = term.write_line("  Waiting for callback (timeout: 5 minutes)...");
+            if manager.get_profile(&profile_name)?.is_some() {
+                let _ = term
+                    .write_line("  Existing OpenAI OAuth profile `openai-oauth` will be replaced.");
+            }
+            let _ = term.write_line("  Starting OpenAI OAuth login...");
+            let _ = term.write_line("  A browser will be opened if available.");
+            let _ = term.write_line(
+                "  If this machine is headless, a URL will be shown for manual completion.",
+            );
             let _ = term.write_line("");
             let client_id = "app_EMoamEEZ73f0CkXaXp7hrann";
             let config = OpenAiOAuthConfig::default_with_client(client_id);
@@ -345,6 +351,13 @@ async fn run_oauth_auth(provider: ProviderId) -> Result<AuthChoice> {
     }
 
     Ok(AuthChoice::OAuth { profile_name })
+}
+
+fn oauth_profile_name(provider: ProviderId) -> Result<String> {
+    Ok(match provider {
+        ProviderId::OpenAi => "openai-oauth".to_string(),
+        _ => format!("{}-{}", provider.as_str(), unix_timestamp()?),
+    })
 }
 
 fn write_provider_config_unchecked(
@@ -470,6 +483,13 @@ mod tests {
         assert!(yaml.contains("api_base: https://chatgpt.com/backend-api/codex"));
         assert!(yaml.contains("gpt-5.3-codex"));
         assert!(!yaml.contains("api_key:"));
+    }
+
+    #[test]
+    fn openai_setup_uses_stable_oauth_profile_name() {
+        let profile_name = oauth_profile_name(ProviderId::OpenAi).expect("derive profile name");
+
+        assert_eq!(profile_name, "openai-oauth");
     }
 
     #[test]

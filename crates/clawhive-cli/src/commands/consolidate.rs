@@ -18,7 +18,7 @@ pub(crate) async fn run(root: &Path) -> Result<()> {
     let consolidator = Arc::new(
         HippocampusConsolidator::new(
             file_store.clone(),
-            Arc::new(build_router_from_config(&config)),
+            Arc::new(build_router_from_config(&config).await),
             "sonnet".to_string(),
             vec!["haiku".to_string()],
         )

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::StatusCode;
@@ -23,11 +23,21 @@ impl OpenAiChatGptProvider {
         chatgpt_account_id: Option<String>,
         api_base: impl Into<String>,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default();
+        Self::with_client(client, access_token, chatgpt_account_id, api_base)
+    }
+
+    pub fn with_client(
+        client: reqwest::Client,
+        access_token: impl Into<String>,
+        chatgpt_account_id: Option<String>,
+        api_base: impl Into<String>,
+    ) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default(),
+            client,
             access_token: access_token.into(),
             chatgpt_account_id,
             api_base: api_base.into().trim_end_matches('/').to_string(),
@@ -971,12 +981,14 @@ mod tests {
         let chunks: Vec<Result<StreamChunk>> = parse_sse_stream(stream).collect().await;
 
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0]
-            .as_ref()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("bad"));
+        assert!(
+            chunks[0]
+                .as_ref()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("bad")
+        );
     }
 
     #[tokio::test]
@@ -989,12 +1001,14 @@ mod tests {
         let chunks: Vec<Result<StreamChunk>> = parse_sse_stream(stream).collect().await;
 
         assert_eq!(chunks.len(), 1);
-        assert!(chunks[0]
-            .as_ref()
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("failed"));
+        assert!(
+            chunks[0]
+                .as_ref()
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("failed")
+        );
     }
 
     #[test]

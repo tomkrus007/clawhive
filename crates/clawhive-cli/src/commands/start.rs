@@ -5,13 +5,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use clawhive_channels::ChannelBot;
 use clawhive_channels::dingtalk::DingTalkBot;
 use clawhive_channels::discord::DiscordBot;
 use clawhive_channels::feishu::FeishuBot;
 use clawhive_channels::telegram::TelegramBot;
 use clawhive_channels::wecom::WeComBot;
-use clawhive_channels::ChannelBot;
-use clawhive_core::heartbeat::{is_heartbeat_ack, should_skip_heartbeat, DEFAULT_HEARTBEAT_PROMPT};
+use clawhive_core::heartbeat::{DEFAULT_HEARTBEAT_PROMPT, is_heartbeat_ack, should_skip_heartbeat};
 use clawhive_core::*;
 use clawhive_gateway::{
     spawn_approval_delivery_listener, spawn_scheduled_task_listener, spawn_wait_task_listener,
@@ -224,7 +224,7 @@ async fn start_bot(
     let consolidator = Arc::new(
         HippocampusConsolidator::new(
             file_store_for_consolidation.clone(),
-            Arc::new(build_router_from_config(&config)),
+            Arc::new(build_router_from_config(&config).await),
             "sonnet".to_string(),
             vec!["haiku".to_string()],
         )
