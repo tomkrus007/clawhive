@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 use anyhow::{anyhow, Result};
 use clawhive_bus::BusPublisher;
@@ -14,6 +13,11 @@ use clawhive_provider::{ContentBlock, LlmMessage, LlmRequest, StreamChunk};
 use clawhive_runtime::TaskExecutor;
 use clawhive_schema::*;
 use futures_core::Stream;
+
+use super::language_prefs::{
+    apply_language_policy_prompt, detect_response_language, is_language_guard_exempt,
+    log_language_guard, LanguagePrefs,
+};
 
 use super::access_gate::{AccessGate, GrantAccessTool, ListAccessTool, RevokeAccessTool};
 use super::approval::ApprovalRegistry;
@@ -32,18 +36,9 @@ use super::tool::{ConversationMessage, ToolContext, ToolExecutor, ToolRegistry};
 use super::web_fetch_tool::WebFetchTool;
 use super::web_search_tool::WebSearchTool;
 use super::workspace::Workspace;
+use super::workspace_manager::{AgentWorkspaceManager, AgentWorkspaceState};
 
 const SKILL_INSTALL_USAGE_HINT: &str = "请提供 skill 来源路径或 URL。用法: /skill install <source>";
-
-/// Per-agent workspace runtime state: file store, session I/O, search index.
-struct AgentWorkspaceState {
-    workspace: Workspace,
-    file_store: MemoryFileStore,
-    session_writer: SessionWriter,
-    session_reader: SessionReader,
-    search_index: SearchIndex,
-    access_gate: Arc<AccessGate>,
-}
 
 pub struct Orchestrator {
     router: Arc<LlmRouter>,
@@ -60,26 +55,175 @@ pub struct Orchestrator {
     bus: BusPublisher,
     approval_registry: Option<Arc<ApprovalRegistry>>,
     runtime: Arc<dyn TaskExecutor>,
-    #[allow(dead_code)]
-    workspace_root: std::path::PathBuf,
-    /// Per-agent workspace state, keyed by agent_id
-    agent_workspaces: HashMap<String, AgentWorkspaceState>,
-    /// Fallback for agents without a dedicated workspace
-    file_store: MemoryFileStore,
-    session_writer: SessionWriter,
-    session_reader: SessionReader,
-    search_index: SearchIndex,
+    workspaces: AgentWorkspaceManager,
     embedding_provider: Arc<dyn EmbeddingProvider>,
     tool_registry: ToolRegistry,
-    default_workspace_root: std::path::PathBuf,
-    default_access_gate: Arc<AccessGate>,
     skill_install_state: Arc<SkillInstallState>,
-    user_language_prefs: RwLock<HashMap<String, ResponseLanguage>>,
+    language_prefs: LanguagePrefs,
+}
+
+/// Builder for [`Orchestrator`]. Use [`OrchestratorBuilder::new`] to start,
+/// call optional setters, then call [`OrchestratorBuilder::build`].
+pub struct OrchestratorBuilder {
+    router: LlmRouter,
+    bus: BusPublisher,
+    memory: Arc<MemoryStore>,
+    runtime: Arc<dyn TaskExecutor>,
+    workspace_root: std::path::PathBuf,
+    schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
+    // Optional with defaults
+    agents: Vec<FullAgentConfig>,
+    personas: HashMap<String, Persona>,
+    session_mgr: Option<SessionManager>,
+    skill_registry: Option<SkillRegistry>,
+    approval_registry: Option<Arc<ApprovalRegistry>>,
+    embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
+    brave_api_key: Option<String>,
+    project_root: Option<std::path::PathBuf>,
+    // Allow overriding auto-derived workspace I/O (e.g. in tests with pre-populated stores)
+    file_store: Option<MemoryFileStore>,
+    session_writer: Option<SessionWriter>,
+    session_reader: Option<SessionReader>,
+    search_index: Option<SearchIndex>,
+}
+
+impl OrchestratorBuilder {
+    pub fn new(
+        router: LlmRouter,
+        bus: BusPublisher,
+        memory: Arc<MemoryStore>,
+        runtime: Arc<dyn TaskExecutor>,
+        workspace_root: std::path::PathBuf,
+        schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
+    ) -> Self {
+        Self {
+            router,
+            bus,
+            memory,
+            runtime,
+            workspace_root,
+            schedule_manager,
+            agents: vec![],
+            personas: HashMap::new(),
+            session_mgr: None,
+            skill_registry: None,
+            approval_registry: None,
+            embedding_provider: None,
+            brave_api_key: None,
+            project_root: None,
+            file_store: None,
+            session_writer: None,
+            session_reader: None,
+            search_index: None,
+        }
+    }
+
+    pub fn agents(mut self, agents: Vec<FullAgentConfig>) -> Self {
+        self.agents = agents;
+        self
+    }
+
+    pub fn personas(mut self, personas: HashMap<String, Persona>) -> Self {
+        self.personas = personas;
+        self
+    }
+
+    pub fn session_mgr(mut self, session_mgr: SessionManager) -> Self {
+        self.session_mgr = Some(session_mgr);
+        self
+    }
+
+    pub fn skill_registry(mut self, skill_registry: SkillRegistry) -> Self {
+        self.skill_registry = Some(skill_registry);
+        self
+    }
+
+    pub fn approval_registry(mut self, approval_registry: Arc<ApprovalRegistry>) -> Self {
+        self.approval_registry = Some(approval_registry);
+        self
+    }
+
+    pub fn embedding_provider(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
+        self.embedding_provider = Some(provider);
+        self
+    }
+
+    pub fn brave_api_key(mut self, key: Option<String>) -> Self {
+        self.brave_api_key = key;
+        self
+    }
+
+    pub fn project_root(mut self, root: std::path::PathBuf) -> Self {
+        self.project_root = Some(root);
+        self
+    }
+
+    pub fn file_store(mut self, file_store: MemoryFileStore) -> Self {
+        self.file_store = Some(file_store);
+        self
+    }
+
+    pub fn session_writer(mut self, session_writer: SessionWriter) -> Self {
+        self.session_writer = Some(session_writer);
+        self
+    }
+
+    pub fn session_reader(mut self, session_reader: SessionReader) -> Self {
+        self.session_reader = Some(session_reader);
+        self
+    }
+
+    pub fn search_index(mut self, search_index: SearchIndex) -> Self {
+        self.search_index = Some(search_index);
+        self
+    }
+
+    pub fn build(self) -> Orchestrator {
+        let file_store = self
+            .file_store
+            .unwrap_or_else(|| MemoryFileStore::new(&self.workspace_root));
+        let session_writer = self
+            .session_writer
+            .unwrap_or_else(|| SessionWriter::new(&self.workspace_root));
+        let session_reader = self
+            .session_reader
+            .unwrap_or_else(|| SessionReader::new(&self.workspace_root));
+        let search_index = self
+            .search_index
+            .unwrap_or_else(|| SearchIndex::new(self.memory.db()));
+        let session_mgr = self
+            .session_mgr
+            .unwrap_or_else(|| SessionManager::new(self.memory.clone(), 1800));
+        let embedding_provider = self
+            .embedding_provider
+            .unwrap_or_else(|| Arc::new(clawhive_memory::embedding::StubEmbeddingProvider::new(8)));
+
+        Orchestrator::new(
+            self.router,
+            self.agents,
+            self.personas,
+            session_mgr,
+            self.skill_registry.unwrap_or_default(),
+            self.memory,
+            self.bus,
+            self.approval_registry,
+            self.runtime,
+            file_store,
+            session_writer,
+            session_reader,
+            search_index,
+            embedding_provider,
+            self.workspace_root,
+            self.brave_api_key,
+            self.project_root,
+            self.schedule_manager,
+        )
+    }
 }
 
 impl Orchestrator {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    fn new(
         router: LlmRouter,
         agents: Vec<FullAgentConfig>,
         personas: HashMap<String, Persona>,
@@ -100,7 +244,6 @@ impl Orchestrator {
         schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
     ) -> Self {
         let router = Arc::new(router);
-        let bus_for_tools = bus.clone();
         let agents_map: HashMap<String, FullAgentConfig> = agents
             .into_iter()
             .map(|a| (a.agent_id.clone(), a))
@@ -109,7 +252,7 @@ impl Orchestrator {
 
         // Build per-agent workspace states
         let effective_project_root = project_root.unwrap_or_else(|| workspace_root.clone());
-        let mut agent_workspaces = HashMap::new();
+        let mut agent_workspace_map = HashMap::new();
         for (agent_id, agent_cfg) in &agents_map {
             let ws = Workspace::resolve(
                 &effective_project_root,
@@ -126,74 +269,38 @@ impl Orchestrator {
                 search_index: SearchIndex::new(memory.db()),
                 access_gate: gate,
             };
-            agent_workspaces.insert(agent_id.clone(), state);
+            agent_workspace_map.insert(agent_id.clone(), state);
         }
-
-        let mut tool_registry = ToolRegistry::new();
-        tool_registry.register(Box::new(MemorySearchTool::new(
-            search_index.clone(),
-            embedding_provider.clone(),
-        )));
-        tool_registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
-        let sub_agent_runner = Arc::new(super::subagent::SubAgentRunner::new(
-            router.clone(),
-            agents_map.clone(),
-            personas_for_subagent,
-            3,
-            vec![],
-        ));
-        tool_registry.register(Box::new(super::subagent_tool::SubAgentTool::new(
-            sub_agent_runner,
-            30,
-        )));
-        // Default access gate for the global tool registry
+        // Build default workspace state from constructor params
+        let default_ws = Workspace::new(workspace_root.clone());
         let default_access_gate = Arc::new(AccessGate::new(
             effective_project_root.clone(),
             effective_project_root.join("access_policy.json"),
         ));
-        // File tools (read/write/edit) are registered here for their DEFINITIONS only,
-        // so the LLM knows they exist. Actual execution is dispatched per-agent in
-        // execute_tool_for_agent() with the correct workspace root.
-        tool_registry.register(Box::new(ReadFileTool::new(
-            workspace_root.clone(),
-            default_access_gate.clone(),
-        )));
-        tool_registry.register(Box::new(WriteFileTool::new(
-            workspace_root.clone(),
-            default_access_gate.clone(),
-        )));
-        tool_registry.register(Box::new(EditFileTool::new(
-            workspace_root.clone(),
-            default_access_gate.clone(),
-        )));
-        tool_registry.register(Box::new(ExecuteCommandTool::new(
-            workspace_root.clone(),
-            30,
-            default_access_gate.clone(),
-            ExecSecurityConfig::default(),
-            SandboxPolicyConfig::default(),
-            approval_registry.clone(),
-            Some(bus_for_tools.clone()),
-            "global".to_string(),
-        )));
-        // Access control tools
-        tool_registry.register(Box::new(GrantAccessTool::new(default_access_gate.clone())));
-        tool_registry.register(Box::new(ListAccessTool::new(default_access_gate.clone())));
-        tool_registry.register(Box::new(RevokeAccessTool::new(default_access_gate.clone())));
-        tool_registry.register(Box::new(WebFetchTool::new()));
-        tool_registry.register(Box::new(ImageTool::new()));
-        tool_registry.register(Box::new(ScheduleTool::new(schedule_manager)));
-        tool_registry.register(Box::new(crate::skill_tool::SkillTool::new(
-            workspace_root.join("skills"),
-        )));
-        tool_registry.register(Box::new(crate::message_tool::MessageTool::new(
-            bus_for_tools.clone(),
-        )));
-        if let Some(api_key) = brave_api_key {
-            if !api_key.is_empty() {
-                tool_registry.register(Box::new(WebSearchTool::new(api_key)));
-            }
-        }
+        let default_state = AgentWorkspaceState {
+            workspace: default_ws,
+            file_store,
+            session_writer,
+            session_reader,
+            search_index,
+            access_gate: default_access_gate,
+        };
+        let workspaces = AgentWorkspaceManager::new(agent_workspace_map, default_state);
+
+        let tool_registry = register_default_tools(
+            workspaces.file_store("__default__"),
+            workspaces.search_index("__default__"),
+            &embedding_provider,
+            workspaces.workspace_root("__default__").as_path(),
+            workspaces.default_root(),
+            &approval_registry,
+            &bus,
+            schedule_manager,
+            brave_api_key,
+            &router,
+            &agents_map,
+            personas_for_subagent,
+        );
 
         Self {
             router: router.clone(),
@@ -212,18 +319,11 @@ impl Orchestrator {
             bus,
             approval_registry,
             runtime,
-            workspace_root,
-            agent_workspaces,
-            file_store,
-            session_writer,
-            session_reader,
-            search_index,
+            workspaces,
             embedding_provider,
             tool_registry,
-            default_workspace_root: effective_project_root,
-            default_access_gate,
             skill_install_state: Arc::new(SkillInstallState::new(900)),
-            user_language_prefs: RwLock::new(HashMap::new()),
+            language_prefs: LanguagePrefs::new(),
         }
     }
 
@@ -393,7 +493,7 @@ impl Orchestrator {
 
         let resolved = super::skill_install::resolve_skill_source(&source).await?;
         let installed = super::skill_install::install_skill_from_analysis(
-            &self.workspace_root,
+            self.workspaces.default_root(),
             &self.skills_root,
             resolved.local_path(),
             &report,
@@ -421,17 +521,11 @@ impl Orchestrator {
     }
 
     fn workspace_root_for(&self, agent_id: &str) -> std::path::PathBuf {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| ws.workspace.root().to_path_buf())
-            .unwrap_or_else(|| self.default_workspace_root.clone())
+        self.workspaces.workspace_root(agent_id)
     }
 
     fn access_gate_for(&self, agent_id: &str) -> Arc<AccessGate> {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| ws.access_gate.clone())
-            .unwrap_or_else(|| self.default_access_gate.clone())
+        self.workspaces.access_gate(agent_id)
     }
 
     fn active_skill_registry(&self) -> SkillRegistry {
@@ -552,82 +646,6 @@ impl Orchestrator {
             .any(|tool| tool.name == name)
     }
 
-    fn get_preferred_language(&self, user_scope: &str) -> Option<ResponseLanguage> {
-        self.user_language_prefs
-            .read()
-            .ok()
-            .and_then(|prefs| prefs.get(user_scope).copied())
-    }
-
-    fn set_preferred_language(&self, user_scope: &str, language: ResponseLanguage) {
-        if let Ok(mut prefs) = self.user_language_prefs.write() {
-            prefs.insert(user_scope.to_string(), language);
-        }
-    }
-
-    fn resolve_target_language(
-        &self,
-        inbound: &InboundMessage,
-        history_messages: &[SessionMessage],
-    ) -> Option<ResponseLanguage> {
-        if let Some(explicit) = detect_explicit_language_preference(&inbound.text) {
-            self.set_preferred_language(&inbound.user_scope, explicit);
-            return Some(explicit);
-        }
-
-        if let Some(current) = detect_text_language(&inbound.text) {
-            self.set_preferred_language(&inbound.user_scope, current);
-            return Some(current);
-        }
-
-        self.get_preferred_language(&inbound.user_scope)
-            .or_else(|| detect_recent_user_language(history_messages))
-    }
-
-    fn apply_language_policy_prompt(
-        &self,
-        system_prompt: &mut String,
-        target_language: Option<ResponseLanguage>,
-    ) {
-        if let Some(language) = target_language {
-            system_prompt.push_str(&language_policy_prompt(language));
-        }
-    }
-
-    fn log_language_guard(
-        &self,
-        agent_id: &str,
-        inbound: &InboundMessage,
-        reply_text: &str,
-        target_language: Option<ResponseLanguage>,
-        is_streaming: bool,
-    ) {
-        if is_language_guard_exempt(&inbound.text) {
-            return;
-        }
-        let Some(target) = target_language else {
-            return;
-        };
-        let Some(detected) = detect_response_language(reply_text) else {
-            return;
-        };
-        if detected == target {
-            return;
-        }
-
-        tracing::warn!(
-            agent_id = %agent_id,
-            channel_type = %inbound.channel_type,
-            connector_id = %inbound.connector_id,
-            conversation_scope = %inbound.conversation_scope,
-            user_scope = %inbound.user_scope,
-            target_language = %target.as_str(),
-            detected_language = %detected.as_str(),
-            is_streaming,
-            "language_guard: response language mismatch"
-        );
-    }
-
     fn build_runtime_system_prompt(
         &self,
         agent_id: &str,
@@ -690,44 +708,25 @@ impl Orchestrator {
         }
     }
 
-    /// Get file store for a specific agent (falls back to global)
     fn file_store_for(&self, agent_id: &str) -> &MemoryFileStore {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| &ws.file_store)
-            .unwrap_or(&self.file_store)
+        self.workspaces.file_store(agent_id)
     }
 
-    /// Get session writer for a specific agent (falls back to global)
     fn session_writer_for(&self, agent_id: &str) -> &SessionWriter {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| &ws.session_writer)
-            .unwrap_or(&self.session_writer)
+        self.workspaces.session_writer(agent_id)
     }
 
-    /// Get session reader for a specific agent (falls back to global)
     fn session_reader_for(&self, agent_id: &str) -> &SessionReader {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| &ws.session_reader)
-            .unwrap_or(&self.session_reader)
+        self.workspaces.session_reader(agent_id)
     }
 
-    /// Get search index for a specific agent (falls back to global)
     fn search_index_for(&self, agent_id: &str) -> &SearchIndex {
-        self.agent_workspaces
-            .get(agent_id)
-            .map(|ws| &ws.search_index)
-            .unwrap_or(&self.search_index)
+        self.workspaces.search_index(agent_id)
     }
 
     /// Ensure workspace directories exist for all agents
     pub async fn ensure_workspaces(&self) -> Result<()> {
-        for state in self.agent_workspaces.values() {
-            state.workspace.ensure_dirs().await?;
-        }
-        Ok(())
+        self.workspaces.ensure_all().await
     }
 
     /// Get a reference to the hook registry for registering hooks.
@@ -974,8 +973,10 @@ impl Orchestrator {
             }
         };
 
-        let target_language = self.resolve_target_language(&inbound, &history_messages);
-        self.apply_language_policy_prompt(&mut system_prompt, target_language);
+        let target_language = self
+            .language_prefs
+            .resolve_target_language(&inbound, &history_messages);
+        apply_language_policy_prompt(&mut system_prompt, target_language);
 
         // Build messages from history (no fake memory dialogue)
         let mut messages = build_messages_from_history(&history_messages);
@@ -1076,7 +1077,7 @@ impl Orchestrator {
             );
         }
 
-        self.log_language_guard(agent_id, &inbound, &reply_text, target_language, false);
+        log_language_guard(agent_id, &inbound, &reply_text, target_language, false);
 
         let outbound = OutboundMessage {
             trace_id: inbound.trace_id,
@@ -1237,8 +1238,10 @@ impl Orchestrator {
             }
         };
 
-        let target_language = self.resolve_target_language(&inbound, &history_messages);
-        self.apply_language_policy_prompt(&mut system_prompt, target_language);
+        let target_language = self
+            .language_prefs
+            .resolve_target_language(&inbound, &history_messages);
+        apply_language_policy_prompt(&mut system_prompt, target_language);
 
         // Build messages from history (no fake memory dialogue, stream variant)
         let mut messages = build_messages_from_history(&history_messages);
@@ -1946,6 +1949,87 @@ impl Orchestrator {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // transitional: will shrink when OrchestratorBuilder lands
+fn register_default_tools(
+    file_store: &MemoryFileStore,
+    search_index: &SearchIndex,
+    embedding_provider: &Arc<dyn EmbeddingProvider>,
+    workspace_root: &std::path::Path,
+    default_root: &std::path::Path,
+    approval_registry: &Option<Arc<ApprovalRegistry>>,
+    bus: &BusPublisher,
+    schedule_manager: Arc<clawhive_scheduler::ScheduleManager>,
+    brave_api_key: Option<String>,
+    router: &Arc<LlmRouter>,
+    agents_map: &HashMap<String, FullAgentConfig>,
+    personas: HashMap<String, Persona>,
+) -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(MemorySearchTool::new(
+        search_index.clone(),
+        embedding_provider.clone(),
+    )));
+    registry.register(Box::new(MemoryGetTool::new(file_store.clone())));
+    let sub_agent_runner = Arc::new(super::subagent::SubAgentRunner::new(
+        router.clone(),
+        agents_map.clone(),
+        personas,
+        3,
+        vec![],
+    ));
+    registry.register(Box::new(super::subagent_tool::SubAgentTool::new(
+        sub_agent_runner,
+        30,
+    )));
+    // Default access gate for the global tool registry
+    let default_access_gate = Arc::new(AccessGate::new(
+        default_root.to_path_buf(),
+        default_root.join("access_policy.json"),
+    ));
+    // File tools (read/write/edit) are registered here for their DEFINITIONS only,
+    // so the LLM knows they exist. Actual execution is dispatched per-agent in
+    // execute_tool_for_agent() with the correct workspace root.
+    registry.register(Box::new(ReadFileTool::new(
+        workspace_root.to_path_buf(),
+        default_access_gate.clone(),
+    )));
+    registry.register(Box::new(WriteFileTool::new(
+        workspace_root.to_path_buf(),
+        default_access_gate.clone(),
+    )));
+    registry.register(Box::new(EditFileTool::new(
+        workspace_root.to_path_buf(),
+        default_access_gate.clone(),
+    )));
+    registry.register(Box::new(ExecuteCommandTool::new(
+        workspace_root.to_path_buf(),
+        30,
+        default_access_gate.clone(),
+        ExecSecurityConfig::default(),
+        SandboxPolicyConfig::default(),
+        approval_registry.clone(),
+        Some(bus.clone()),
+        "global".to_string(),
+    )));
+    // Access control tools
+    registry.register(Box::new(GrantAccessTool::new(default_access_gate.clone())));
+    registry.register(Box::new(ListAccessTool::new(default_access_gate.clone())));
+    registry.register(Box::new(RevokeAccessTool::new(default_access_gate.clone())));
+    registry.register(Box::new(WebFetchTool::new()));
+    registry.register(Box::new(ImageTool::new()));
+    registry.register(Box::new(ScheduleTool::new(schedule_manager)));
+    registry.register(Box::new(crate::skill_tool::SkillTool::new(
+        workspace_root.join("skills"),
+    )));
+    registry.register(Box::new(crate::message_tool::MessageTool::new(bus.clone())));
+    if let Some(api_key) = brave_api_key {
+        if !api_key.is_empty() {
+            registry.register(Box::new(WebSearchTool::new(api_key)));
+        }
+    }
+    registry
+}
+
 fn build_messages_from_history(history_messages: &[SessionMessage]) -> Vec<LlmMessage> {
     let mut messages = Vec::new();
     let mut prev_timestamp = None;
@@ -2100,151 +2184,6 @@ fn filter_no_reply(text: &str) -> String {
         .trim();
 
     text.to_string()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResponseLanguage {
-    Chinese,
-    English,
-}
-
-impl ResponseLanguage {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Chinese => "zh",
-            Self::English => "en",
-        }
-    }
-
-    fn display_name(self) -> &'static str {
-        match self {
-            Self::Chinese => "Chinese",
-            Self::English => "English",
-        }
-    }
-}
-
-fn detect_explicit_language_preference(text: &str) -> Option<ResponseLanguage> {
-    let lower = text.to_ascii_lowercase();
-    let wants_chinese = text.contains("用中文")
-        || text.contains("说中文")
-        || text.contains("中文回复")
-        || text.contains("回复中文")
-        || lower.contains("reply in chinese")
-        || lower.contains("respond in chinese")
-        || lower.contains("speak chinese")
-        || lower.contains("in chinese");
-    let wants_english = text.contains("用英文")
-        || text.contains("说英文")
-        || text.contains("英文回复")
-        || text.contains("回复英文")
-        || lower.contains("reply in english")
-        || lower.contains("respond in english")
-        || lower.contains("speak english")
-        || lower.contains("in english");
-
-    match (wants_chinese, wants_english) {
-        (true, false) => Some(ResponseLanguage::Chinese),
-        (false, true) => Some(ResponseLanguage::English),
-        _ => None,
-    }
-}
-
-fn is_cjk_char(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x3400..=0x4DBF
-            | 0x4E00..=0x9FFF
-            | 0xF900..=0xFAFF
-            | 0x20000..=0x2A6DF
-            | 0x2A700..=0x2B73F
-            | 0x2B740..=0x2B81F
-            | 0x2B820..=0x2CEAF
-    )
-}
-
-fn detect_text_language(text: &str) -> Option<ResponseLanguage> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let cjk_count = trimmed.chars().filter(|ch| is_cjk_char(*ch)).count();
-    if cjk_count >= 1 {
-        return Some(ResponseLanguage::Chinese);
-    }
-
-    let ascii_letters = trimmed
-        .chars()
-        .filter(|ch| ch.is_ascii_alphabetic())
-        .count();
-    let alpha_words = trimmed
-        .split_whitespace()
-        .filter(|word| word.chars().all(|ch| ch.is_ascii_alphabetic()))
-        .count();
-    if ascii_letters >= 6 || alpha_words >= 2 {
-        return Some(ResponseLanguage::English);
-    }
-
-    None
-}
-
-fn detect_recent_user_language(history_messages: &[SessionMessage]) -> Option<ResponseLanguage> {
-    history_messages
-        .iter()
-        .rev()
-        .filter(|message| message.role == "user")
-        .find_map(|message| detect_text_language(&message.content))
-}
-
-fn language_policy_prompt(target_language: ResponseLanguage) -> String {
-    format!(
-        "\n\n## Language Policy\nRespond in {} by default, matching the user's latest message language. Keep code blocks, file paths, command names, and URLs in their original form.",
-        target_language.display_name()
-    )
-}
-
-fn is_language_guard_exempt(user_text: &str) -> bool {
-    let lower = user_text.to_ascii_lowercase();
-    user_text.contains("翻译")
-        || user_text.contains("双语")
-        || user_text.contains("中英")
-        || lower.contains("translate")
-        || lower.contains("translation")
-        || lower.contains("bilingual")
-}
-
-fn normalize_text_for_language_detection(text: &str) -> String {
-    let mut in_code_fence = false;
-    let mut lines = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            in_code_fence = !in_code_fence;
-            continue;
-        }
-        if in_code_fence {
-            continue;
-        }
-        lines.push(line.replace('`', " "));
-    }
-
-    let joined = lines.join("\n");
-    joined
-        .split_whitespace()
-        .filter(|token| {
-            !token.starts_with("http://")
-                && !token.starts_with("https://")
-                && !token.starts_with("www.")
-                && !token.contains("://")
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn detect_response_language(text: &str) -> Option<ResponseLanguage> {
-    let normalized = normalize_text_for_language_detection(text);
-    detect_text_language(&normalized)
 }
 
 const SLOW_LLM_ROUND_WARN_MS: u64 = 30_000;
@@ -2511,32 +2450,6 @@ Body"#,
         assert!(!should_inject_web_search_reminder(false, false, false, 0));
         assert!(!should_inject_web_search_reminder(true, false, true, 0));
         assert!(!should_inject_web_search_reminder(true, false, false, 1));
-    }
-
-    #[test]
-    fn detect_text_language_handles_cjk_and_english() {
-        assert_eq!(
-            detect_text_language("请你用中文回答我"),
-            Some(ResponseLanguage::Chinese)
-        );
-        assert_eq!(
-            detect_text_language("Please answer in English"),
-            Some(ResponseLanguage::English)
-        );
-    }
-
-    #[test]
-    fn detect_text_language_returns_none_for_ambiguous_short_input() {
-        assert_eq!(detect_text_language("ok"), None);
-        assert_eq!(detect_text_language("1"), None);
-    }
-
-    #[test]
-    fn language_policy_prompt_includes_target_language() {
-        let zh = language_policy_prompt(ResponseLanguage::Chinese);
-        assert!(zh.contains("Chinese"));
-        let en = language_policy_prompt(ResponseLanguage::English);
-        assert!(en.contains("English"));
     }
 
     #[test]

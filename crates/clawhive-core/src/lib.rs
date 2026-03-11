@@ -8,6 +8,7 @@ pub mod file_tools;
 pub mod heartbeat;
 pub mod hooks;
 pub mod image_tool;
+mod language_prefs;
 pub mod memory_tools;
 pub mod message_tool;
 pub mod orchestrator;
@@ -33,6 +34,7 @@ pub mod wait_tool;
 pub mod web_fetch_tool;
 pub mod web_search_tool;
 pub mod workspace;
+mod workspace_manager;
 
 pub use access_gate::*;
 pub use approval::*;
